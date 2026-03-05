@@ -135,11 +135,9 @@ class MusicPlayer:
                 requester = self.interaction.user.mention
                 voice_channel = self.interaction.user.voice.channel.name if self.interaction.user.voice else '未知'
 
-                # 標題格式：標題 - 作者
-                display_title = f"{title} - {author}" if author else title
-
+                # 標題格式：標題（粗體） 和 作者（下一行）
                 embed = discord.Embed(title="🎵 正在播放", color=discord.Color.blue())
-                embed.description = display_title
+                embed.description = f"**{title}**\n{author}" if author else f"**{title}**"
                 embed.url = url
                 if thumbnail:
                     embed.set_thumbnail(url=thumbnail)
