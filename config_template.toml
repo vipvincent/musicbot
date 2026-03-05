@@ -9,4 +9,4 @@ ffmpeg = "ffmpeg/ffmpeg.exe"
 [ffmpeg_options]
 # ffmpeg 參數
 before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-options = "-vn"
+options = "-vn -b:a 192k -bufsize 512k -threads 2 -loglevel panic"

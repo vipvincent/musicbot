@@ -122,18 +122,157 @@ class MusicPlayer:
 
                 self.voice_client.play(self.current, after=lambda _: self.loop.call_soon_threadsafe(self.next.set))
                 
-                embed = discord.Embed(
-                    title="🎵 正在播放", 
-                    description=f"**{self.current.title}**", 
-                    color=discord.Color.blue()
-                )
-                if 'webpage_url' in source_data:
-                    embed.url = source_data['webpage_url']
-                
-                await self.interaction.channel.send(embed=embed)
+                # 取得歌曲資訊
+                title = self.current.title or '未知'
+                author = source_data.get('uploader', '未知')
+                url = source_data.get('webpage_url')
+                # 饠覬：嚡控從 thumbnails 列表中加載，或直接從 thumbnail 字段中加載
+                thumbnail = None
+                if 'thumbnails' in source_data and source_data['thumbnails']:
+                    thumbnail = source_data['thumbnails'][-1].get('url')
+                if not thumbnail:
+                    thumbnail = source_data.get('thumbnail')
+                requester = self.interaction.user.mention
+                voice_channel = self.interaction.user.voice.channel.name if self.interaction.user.voice else '未知'
+
+                # 標題格式：標題 - 作者
+                display_title = f"{title} - {author}" if author else title
+
+                embed = discord.Embed(title="🎵 正在播放", color=discord.Color.blue())
+                embed.description = display_title
+                embed.url = url
+                if thumbnail:
+                    embed.set_thumbnail(url=thumbnail)
+                embed.add_field(name=" ", value=f"{requester}  \u200b |  \uD83D\uDD0A {voice_channel}", inline=False)
+
+                # 定義互動按鈕
+                class NowPlayingView(discord.ui.View):
+                    def __init__(self, music_cog, guild_id):
+                        super().__init__(timeout=None)
+                        self.music_cog = music_cog
+                        self.guild_id = guild_id
+
+                    @discord.ui.button(label="下一首", style=discord.ButtonStyle.primary, custom_id="music_skip")
+                    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+                        try:
+                            await interaction.response.defer(thinking=False)
+                            if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+                                await interaction.channel.send("目前沒有正在播放的音樂。")
+                                return
+                            interaction.guild.voice_client.stop()
+                            await interaction.channel.send("已跳過歌曲。")
+                        except Exception as e:
+                            print("[skip 按鈕錯誤]", e)
+
+                    @discord.ui.button(label="列出播放清單", style=discord.ButtonStyle.secondary, custom_id="music_queue")
+                    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+                        try:
+                            await interaction.response.defer(thinking=False)
+                            player = self.music_cog.players.get(self.guild_id)
+                            if not player or player.queue.empty():
+                                await interaction.channel.send("目前隊列是空的。")
+                                return
+                            upcoming = list(player.queue._queue)
+                            per_page = 10
+                            total = len(upcoming)
+                            max_page = (total - 1) // per_page + 1
+                            
+                            # 定義分頁 View
+                            class QueueView(discord.ui.View):
+                                def __init__(self, queue_data, page, max_page):
+                                    super().__init__(timeout=None)
+                                    self.queue_data = queue_data
+                                    self.current_page = page
+                                    self.max_page = max_page
+                                    self.update_buttons()
+                                
+                                def update_buttons(self):
+                                    # 動態更新按鈕狀態
+                                    if self.current_page <= 1:
+                                        self.children[0].disabled = True
+                                    else:
+                                        self.children[0].disabled = False
+                                    if self.current_page >= self.max_page:
+                                        self.children[1].disabled = True
+                                    else:
+                                        self.children[1].disabled = False
+                                
+                                @discord.ui.button(label="⬅️ 上一頁", style=discord.ButtonStyle.secondary, custom_id="queue_prev")
+                                async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+                                    if self.current_page > 1:
+                                        self.current_page -= 1
+                                        self.update_buttons()
+                                        await self.update_message(interaction)
+                                
+                                @discord.ui.button(label="下一頁 ➡️", style=discord.ButtonStyle.secondary, custom_id="queue_next")
+                                async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+                                    if self.current_page < self.max_page:
+                                        self.current_page += 1
+                                        self.update_buttons()
+                                        await self.update_message(interaction)
+                                
+                                async def update_message(self, interaction: discord.Interaction):
+                                    try:
+                                        await interaction.response.defer(thinking=False)
+                                        per_page = 10
+                                        start = (self.current_page - 1) * per_page
+                                        end = start + per_page
+                                        fmt = "\n".join([f"{i+1}. {item['title']}" for i, item in enumerate(self.queue_data[start:end], start=start)])
+                                        embed = discord.Embed(title=f"待播放清單 (第 {self.current_page}/{self.max_page} 頁，共 {len(self.queue_data)} 首)", description=fmt, color=discord.Color.green())
+                                        await interaction.edit_original_response(embed=embed, view=self)
+                                    except Exception as e:
+                                        print("[queue 分頁錯誤]", e)
+                            
+                            start = 0
+                            end = min(per_page, total)
+                            fmt = "\n".join([f"{i+1}. {item['title']}" for i, item in enumerate(upcoming[start:end], start=start)])
+                            embed = discord.Embed(title=f"待播放清單 (第 1/{max_page} 頁，共 {total} 首)", description=fmt, color=discord.Color.green())
+                            view = QueueView(upcoming, 1, max_page)
+                            await interaction.channel.send(embed=embed, view=view)
+                        except Exception as e:
+                            print("[queue 按鈕錯誤]", e)
+
+                    @discord.ui.button(label="清空", style=discord.ButtonStyle.danger, custom_id="music_clear")
+                    async def clear_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+                        try:
+                            await interaction.response.defer(thinking=False)
+                            player = self.music_cog.players.get(self.guild_id)
+                            if not player or player.queue.empty():
+                                await interaction.channel.send("播放清單已經是空的。")
+                                return
+                            while not player.queue.empty():
+                                try:
+                                    player.queue.get_nowait()
+                                except Exception:
+                                    break
+                            await interaction.channel.send("已清空播放清單。")
+                        except Exception as e:
+                            print("[clear 按鈕錯誤]", e)
+
+                    @discord.ui.button(label="離開", style=discord.ButtonStyle.danger, custom_id="music_leave")
+                    async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+                        try:
+                            await interaction.response.defer(thinking=False)
+                            if not interaction.guild.voice_client:
+                                await interaction.channel.send("機器人不在語音頻道中。")
+                                return
+                            player = self.music_cog.players.get(self.guild_id)
+                            if player:
+                                player.destroy()
+                            else:
+                                await interaction.guild.voice_client.disconnect()
+                            await interaction.channel.send("已離開語音頻道。")
+                        except Exception as e:
+                            print("[leave 按鈕錯誤]", e)
+
+                # 取得 Music Cog 實例
+                music_cog = self.interaction.client.get_cog('Music')
+                view = NowPlayingView(music_cog, self.interaction.guild_id)
+                await self.interaction.channel.send(embed=embed, view=view)
                 await self.next.wait()
             except Exception as e:
-                await self.interaction.channel.send(f"播放時發生錯誤: {e}")
+                print("[播放時發生錯誤]", e)
+                await self.interaction.channel.send("播放時發生錯誤，請稍後再試。")
             
             self.current = None
 
@@ -157,6 +296,7 @@ class MusicPlayer:
             return self.loop.create_task(self.voice_client.disconnect())
 
 class Music(commands.Cog):
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.players = {}
@@ -164,74 +304,134 @@ class Music(commands.Cog):
     def get_player(self, interaction: discord.Interaction):
         if interaction.guild_id in self.players:
             return self.players[interaction.guild_id]
-
         player = MusicPlayer(interaction)
         self.players[interaction.guild_id] = player
         return player
 
     @app_commands.command(name="play", description="播放 YouTube 音樂 (支援網址、關鍵字、播放清單)")
+    @app_commands.describe(song="請輸入網址、關鍵字或播放清單")
     async def play(self, interaction: discord.Interaction, song: str):
-        await interaction.response.defer()
-
-        # 檢查用戶是否在語音頻道
-        if not interaction.user.voice:
-            return await interaction.followup.send("你必須先加入一個語音頻道！")
-
-        # 連接語音頻道
-        if not interaction.guild.voice_client:
-            await interaction.user.voice.channel.connect()
-        elif interaction.guild.voice_client.channel != interaction.user.voice.channel:
-            return await interaction.followup.send("機器人已經在另一個頻道中播放了。")
-
-        player = self.get_player(interaction)
-
         try:
-            # 取得音樂資訊 (支援播放清單)
-            sources = await YTDLSource.from_url(song, loop=self.bot.loop, stream=True)
-            
-            for source_data in sources:
-                await player.queue.put(source_data)
-
-            if len(sources) > 1:
-                await interaction.followup.send(f"已加入播放清單：**{len(sources)}** 首音樂至隊列。")
-            else:
-                await interaction.followup.send(f"已加入隊列：**{sources[0]['title']}**")
-
+            await interaction.response.defer()
+            if not interaction.user.voice:
+                return await interaction.followup.send("你必須先加入一個語音頻道！")
+            if not interaction.guild.voice_client:
+                await interaction.user.voice.channel.connect()
+            elif interaction.guild.voice_client.channel != interaction.user.voice.channel:
+                return await interaction.followup.send("機器人已經在另一個頻道中播放了。")
+            player = self.get_player(interaction)
+            try:
+                sources = await YTDLSource.from_url(song, loop=self.bot.loop, stream=True)
+                for source_data in sources:
+                    await player.queue.put(source_data)
+                if len(sources) > 1:
+                    await interaction.followup.send(f"已加入播放清單：**{len(sources)}** 首音樂至隊列。")
+                else:
+                    await interaction.followup.send(f"已加入隊列：**{sources[0]['title']}**")
+            except Exception as e:
+                print("[play 指令發生錯誤]", e)
+                await interaction.followup.send("播放時發生錯誤，請稍後再試。")
         except Exception as e:
-            await interaction.followup.send(f"播放時發生錯誤: {e}")
+            print("[play 指令外層錯誤]", e)
+            try:
+                await interaction.followup.send("發生錯誤，請稍後再試。")
+            except Exception:
+                pass
 
     @app_commands.command(name="skip", description="跳過當前歌曲")
     async def skip(self, interaction: discord.Interaction):
-        if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
-            return await interaction.response.send_message("目前沒有正在播放的音樂。")
-        
-        interaction.guild.voice_client.stop()
-        await interaction.response.send_message("已跳過歌曲。")
+        try:
+            if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+                return await interaction.response.send_message("目前沒有正在播放的音樂。")
+            interaction.guild.voice_client.stop()
+            await interaction.response.send_message("已跳過歌曲。")
+        except Exception as e:
+            print("[skip 指令錯誤]", e)
+            try:
+                await interaction.response.send_message("發生錯誤，請稍後再試。")
+            except Exception:
+                pass
 
     @app_commands.command(name="stop", description="停止播放並清空隊列")
     async def stop(self, interaction: discord.Interaction):
-        if not interaction.guild.voice_client:
-            return await interaction.response.send_message("機器人不在語音頻道中。")
+        try:
+            if not interaction.guild.voice_client:
+                return await interaction.response.send_message("機器人不在語音頻道中。")
+            player = self.players.get(interaction.guild_id)
+            if player:
+                player.destroy()
+            else:
+                await interaction.guild.voice_client.disconnect()
+            await interaction.response.send_message("已停止播放並離開頻道。")
+        except Exception as e:
+            print("[stop 指令錯誤]", e)
+            try:
+                await interaction.response.send_message("發生錯誤，請稍後再試。")
+            except Exception:
+                pass
 
-        # 取得播放器並執行銷毀邏輯 (包含取消任務、清空、斷開連接)
-        player = self.players.get(interaction.guild_id)
-        if player:
-            player.destroy()
-        else:
-            await interaction.guild.voice_client.disconnect()
-        
-        await interaction.response.send_message("已停止播放並離開頻道。")
 
-    @app_commands.command(name="queue", description="查看當前待播放清單")
-    async def queue_info(self, interaction: discord.Interaction):
-        player = self.players.get(interaction.guild_id)
-        if not player or player.queue.empty():
-            return await interaction.response.send_message("目前隊列是空的。")
+    @app_commands.command(name="queue", description="查看當前待播放清單（支援翻頁，每頁 10 首）")
+    @app_commands.describe(page="要查看的頁數（預設第 1 頁）")
+    async def queue_info(self, interaction: discord.Interaction, page: int = 1):
+        try:
+            player = self.players.get(interaction.guild_id)
+            if not player or player.queue.empty():
+                return await interaction.response.send_message("目前隊列是空的。")
+            upcoming = list(player.queue._queue)
+            per_page = 10
+            total = len(upcoming)
+            max_page = (total - 1) // per_page + 1
+            if page < 1 or page > max_page:
+                return await interaction.response.send_message(f"頁數超出範圍，請輸入 1 ~ {max_page} 之間的數字。")
+            start = (page - 1) * per_page
+            end = start + per_page
+            fmt = "\n".join([f"{i+1}. {item['title']}" for i, item in enumerate(upcoming[start:end], start=start)])
+            embed = discord.Embed(title=f"待播放清單 (第 {page}/{max_page} 頁，共 {total} 首)", description=fmt, color=discord.Color.green())
+            await interaction.response.send_message(embed=embed)
+        except Exception as e:
+            print("[queue 指令錯誤]", e)
+            try:
+                await interaction.response.send_message("發生錯誤，請稍後再試。")
+            except Exception:
+                pass
 
-        upcoming = list(player.queue._queue)
-        fmt = "\n".join([f"{i+1}. {item['title']}" for i, item in enumerate(upcoming[:10])])
-        embed = discord.Embed(title=f"待播放清單 (前 {len(upcoming[:10])} 首)", description=fmt, color=discord.Color.green())
-        await interaction.response.send_message(embed=embed)
+    @app_commands.command(name="clear", description="清空播放清單（不離開語音頻道）")
+    async def clear(self, interaction: discord.Interaction):
+        try:
+            player = self.players.get(interaction.guild_id)
+            if not player or player.queue.empty():
+                return await interaction.response.send_message("播放清單已經是空的。")
+            while not player.queue.empty():
+                try:
+                    player.queue.get_nowait()
+                except Exception:
+                    break
+            await interaction.response.send_message("已清空播放清單。")
+        except Exception as e:
+            print("[clear 指令錯誤]", e)
+            try:
+                await interaction.response.send_message("發生錯誤，請稍後再試。")
+            except Exception:
+                pass
+    
+    @app_commands.command(name="leave", description="離開語音頻道（等同 /stop）")
+    async def leave(self, interaction: discord.Interaction):
+        try:
+            if not interaction.guild.voice_client:
+                return await interaction.response.send_message("機器人不在語音頻道中。")
+            player = self.players.get(interaction.guild_id)
+            if player:
+                player.destroy()
+            else:
+                await interaction.guild.voice_client.disconnect()
+            await interaction.response.send_message("已離開語音頻道。")
+        except Exception as e:
+            print("[leave 指令錯誤]", e)
+            try:
+                await interaction.response.send_message("發生錯誤，請稍後再試。")
+            except Exception:
+                pass
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Music(bot))
