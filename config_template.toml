@@ -4,7 +4,7 @@ token = "YOUR_DISCORD_BOT_TOKEN"
 
 [paths]
 # ffmpeg 檔案目錄
-ffmpeg = "ffmpeg/ffmpeg.exe"
+ffmpeg = "ffmpeg/"
 
 [ffmpeg_options]
 # ffmpeg 參數

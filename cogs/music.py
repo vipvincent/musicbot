@@ -11,7 +11,8 @@ with open("config.toml", "rb") as f:
     config = tomllib.load(f)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FFMPEG_PATH = os.path.join(BASE_DIR, config["paths"]["ffmpeg"])
+FFMPEG_DIR = os.path.join(BASE_DIR, config["paths"]["ffmpeg"])
+FFMPEG_PATH = os.path.join(FFMPEG_DIR, "ffmpeg")
 
 FFMPEG_OPTIONS = {
     'before_options': config["ffmpeg_options"]["before_options"],
@@ -136,12 +137,12 @@ class MusicPlayer:
                 voice_channel = self.interaction.user.voice.channel.name if self.interaction.user.voice else '未知'
 
                 # 標題格式：標題（粗體） 和 作者（下一行）
-                embed = discord.Embed(title="🎵 正在播放", color=discord.Color.blue())
+                embed = discord.Embed(title=":musical_note:  正在播放", color=discord.Color.blue())
                 embed.description = f"**{title}**\n{author}" if author else f"**{title}**"
                 embed.url = url
                 if thumbnail:
                     embed.set_thumbnail(url=thumbnail)
-                embed.add_field(name=" ", value=f"{requester}  \u200b |  \uD83D\uDD0A {voice_channel}", inline=False)
+                embed.add_field(name=" ", value=f"{requester} | :loud_sound: {voice_channel}", inline=False)
 
                 # 定義互動按鈕
                 class NowPlayingView(discord.ui.View):
