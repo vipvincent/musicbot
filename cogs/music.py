@@ -262,10 +262,10 @@ class Music(commands.Cog):
     async def skip_logic(self, interaction: discord.Interaction):
         try:
             if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
-                return await interaction.response.send_message("目前沒有正在播放的音樂。", ephemeral=True)
+                return await interaction.response.send_message(":x: 目前沒有正在播放的音樂。", ephemeral=True)
             
             player = self.players.get(interaction.guild_id)
-            title = player.current.title if player and player.current else "未知歌曲"
+            title = player.current.title if player and player.current else ":x: 未知歌曲"
             
             interaction.guild.voice_client.stop()
             
