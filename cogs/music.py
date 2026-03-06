@@ -96,10 +96,17 @@ class MusicPlayer:
             self.next.clear()
 
             try:
-                # 等待下一首歌，如果 5 分鐘沒動靜就離開
-                async with asyncio.timeout(300):
+                # 等待下一首歌，如果 30 分鐘沒動靜就離開
+                async with asyncio.timeout(1800):
                     source_data = await self.queue.get()
-            except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError):
+            except (asyncio.TimeoutError, TimeoutError):
+                # 超時離開的通知
+                try:
+                    await self.interaction.channel.send("⏰ 偵測到長時間未播放音樂，機器人已自動離開語音頻道。")
+                except:
+                    pass
+                return self.destroy()
+            except asyncio.CancelledError:
                 return self.destroy()
 
             try:
