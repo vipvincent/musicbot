@@ -5,6 +5,7 @@ import asyncio
 import tomllib
 import os
 import yt_dlp
+import time
 
 # 讀取 config.toml
 with open("config.toml", "rb") as f:
@@ -22,9 +23,13 @@ FFMPEG_OPTIONS = {
     'executable': FFMPEG_PATH
 }
 
+# 距離歌曲結束多少秒時開始預解析下一首
+PREFETCH_BEFORE_END = 30
+
 # YTDL 提取器設定
 ytdl_format_options = {
-    'format': 'bestaudio/best',
+    # 優先使用 Opus 音軌，若無再退回一般 bestaudio
+    'format': 'bestaudio[acodec=opus]/bestaudio/best',
     'noplaylist': False,
     'quiet': True,
     'no_warnings': True,
@@ -37,7 +42,8 @@ ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
 # 用於獲取真正直接流網址的提取器 (不使用 flat 模式)
 ytdl_full_options = {
-    'format': 'bestaudio/best',
+    # 同樣優先選擇 Opus
+    'format': 'bestaudio[acodec=opus]/bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
@@ -45,12 +51,21 @@ ytdl_full_options = {
 }
 ytdl_full = yt_dlp.YoutubeDL(ytdl_full_options)
 
-class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5):
-        super().__init__(source, volume)
+class YTDLSource(discord.AudioSource):
+    def __init__(self, source, *, data):
+        # 包裝實際的 AudioSource (這裡會是 FFmpegOpusAudio)
+        self.source = source
         self.data = data
         self.title = data.get('title')
         self.url = data.get('url')
+
+    def read(self):
+        # 直接轉交給內部來源，不再進行 PCM 音量處理，確保 Opus 位元流不被破壞
+        return self.source.read()
+
+    def is_opus(self):
+        # 若內部來源已經是 Opus，讓 VoiceClient 直接傳送而不重新編碼
+        return getattr(self.source, "is_opus", lambda: False)()
 
     @classmethod
     async def from_url(cls, search: str, *, loop=None, stream=True):
@@ -86,6 +101,76 @@ class MusicPlayer:
         self.voice_client = interaction.guild.voice_client
         self.loop = interaction.client.loop
         self.player_task = self.loop.create_task(self.player_loop())
+        # 用於背景預解析下一首的任務
+        self.prefetch_task: asyncio.Task | None = None
+        # 用於估算目前已播放時間（偵測接近結束）
+        self.current_start_time: float | None = None
+        self.current_duration: float | None = None
+
+    async def _prefetch_watcher(self):
+        """持續偵測目前這首是否接近結束，接近時才預解析下一首"""
+        try:
+            while True:
+                # 若目前沒有正在播放的歌或已經沒有下一首，就結束 watcher
+                if not self.current or not self.voice_client or not self.voice_client.is_connected():
+                    break
+
+                # 如果隊列為空，暫時不需要預解析，稍後再看情況
+                if self.queue.empty():
+                    await asyncio.sleep(1.0)
+                    continue
+
+                # 若無法取得長度，直接立刻預解析一次就離開（以免頻繁重試）
+                if self.current_duration is None or self.current_duration <= 0 or self.current_start_time is None:
+                    await self.prefetch_next()
+                    break
+
+                elapsed = time.time() - self.current_start_time
+                remaining = self.current_duration - elapsed
+
+                # 一旦推估「剩餘時間 <= 門檻」，就進行預解析並結束 watcher
+                if remaining <= PREFETCH_BEFORE_END:
+                    await self.prefetch_next()
+                    break
+
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            # 正常取消，不需要印錯
+            return
+        except Exception as e:
+            print("[預解析下一首時發生錯誤]", e)
+
+    def schedule_prefetch(self):
+        """啟動或重啟預解析偵測任務"""
+        if self.prefetch_task and not self.prefetch_task.done():
+            self.prefetch_task.cancel()
+        self.prefetch_task = self.loop.create_task(self._prefetch_watcher())
+
+    async def prefetch_next(self):
+        """實際執行下一首的預解析邏輯"""
+        if self.queue.empty():
+            return
+
+        # 僅預處理「下一首」而不是整個清單，避免白做工
+        try:
+            next_source_data = self.queue._queue[0]
+        except (AttributeError, IndexError):
+            return
+
+        # 依照主播放邏輯取得適合播放的 URL，但不啟動 ffmpeg，只取串流網址
+        url = next_source_data.get('url')
+        if not url or any(x in url for x in ['youtube.com', 'youtu.be', 'googlevideo.com']) or not str(url).startswith('http'):
+            target = next_source_data.get('webpage_url') or next_source_data.get('url')
+            if target and not str(target).startswith('http'):
+                target = f"https://www.youtube.com/watch?v={target}"
+            if target:
+                url = await YTDLSource.get_direct_url(target, self.loop)
+
+        if not url:
+            return
+
+        # 記錄預解析結果，供稍後真正播放時使用
+        next_source_data['prefetched_url'] = url
 
     async def player_loop(self):
         await self.interaction.client.wait_until_ready()
@@ -112,23 +197,39 @@ class MusicPlayer:
                 if not self.voice_client or not self.voice_client.is_connected():
                     break
 
-                # 獲取播放資訊中的網址
-                url = source_data.get('url')
-                # 如果網址無效、或是來自 YouTube (通常需要新鮮的串流網址)
-                if not url or any(x in url for x in ['youtube.com', 'youtu.be', 'googlevideo.com']) or not url.startswith('http'):
-                    target = source_data.get('webpage_url') or source_data.get('url')
-                    # 如果 target 看起來只是 ID，重建完整網址以提升識別率
-                    if target and not target.startswith('http'):
-                        target = f"https://www.youtube.com/watch?v={target}"
-                    
-                    # 獲取新鮮的 stream URL
-                    url = await YTDLSource.get_direct_url(target, self.loop)
+                # 獲取播放資訊中的網址：若已經有預解析結果就先用，否則即時取得
+                url = source_data.get('prefetched_url')
+                if not url:
+                    url = source_data.get('url')
+                    # 如果網址無效、或是來自 YouTube (通常需要新鮮的串流網址)
+                    if not url or any(x in url for x in ['youtube.com', 'youtu.be', 'googlevideo.com']) or not str(url).startswith('http'):
+                        target = source_data.get('webpage_url') or source_data.get('url')
+                        # 如果 target 看起來只是 ID，重建完整網址以提升識別率
+                        if target and not str(target).startswith('http'):
+                            target = f"https://www.youtube.com/watch?v={target}"
+                        
+                        # 獲取新鮮的 stream URL
+                        url = await YTDLSource.get_direct_url(target, self.loop)
+
+                    # 即時取得成功的話，也同步寫回預解析欄位，方便下一次重播或檢查
+                    if url:
+                        source_data['prefetched_url'] = url
 
                 if not url:
                     await self.interaction.channel.send(f":x: 哎呀，我拿不到 **{source_data.get('title', '未知')}** 的播放資訊耶，這首可能要先跳過囉！")
                     continue
 
-                source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
+                # 更新目前歌曲的開始時間與長度資訊，後續預解析會用到
+                duration = source_data.get('duration')
+                try:
+                    self.current_duration = float(duration) if duration is not None else None
+                except (TypeError, ValueError):
+                    self.current_duration = None
+                self.current_start_time = time.time()
+
+                # 使用 FFmpeg 直接產生 Opus 音訊，避免 Discord 端再次轉碼
+                # 這裡指定 method='fallback'，避免使用「native」探測模式導致 ffmpeg 失敗時噴錯
+                source = await discord.FFmpegOpusAudio.from_probe(url, method='fallback', **FFMPEG_OPTIONS)
                 self.current = YTDLSource(source, data=source_data)
 
                 self.voice_client.play(self.current, after=lambda _: self.loop.call_soon_threadsafe(self.next.set))
@@ -140,12 +241,11 @@ class MusicPlayer:
                         await music_cog.nowplaying_logic(self.interaction, source_data=source_data, current=self.current, incoming_player=self, silent=True)
                 except Exception as msg_e:
                     print(f"[正在播放訊息發送失敗 (不影響播放)]: {msg_e}")
-                
-                await self.next.wait()
 
-                # 定義互動按鈕
-                # 移除原有的 View 定義，稍後移動到 Music 類別中
-                pass
+                # 啟動背景預解析下一首（若有）
+                self.schedule_prefetch()
+
+                await self.next.wait()
             except Exception as e:
                 print("[播放時發生錯誤]", e)
                 await self.interaction.channel.send(":x: 嗚嗚，我拿不到這首歌的播放資訊耶，暫時沒辦法唱給你聽喔！")
@@ -158,6 +258,10 @@ class MusicPlayer:
         cog = self.interaction.client.get_cog('Music')
         if cog and self.interaction.guild_id in cog.players:
             del cog.players[self.interaction.guild_id]
+
+        # 停止任何預解析任務，避免離開語音後仍在背景跑 yt_dlp
+        if self.prefetch_task and not self.prefetch_task.done():
+            self.prefetch_task.cancel()
 
         # 1. 先停止語音輸出，這會觸發 ffmpeg 進程的關閉
         if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
@@ -298,6 +402,8 @@ class Music(commands.Cog):
                 search_message = None
 
             player = self.get_player(interaction)
+            # 記錄加入前隊列是否為空，用來決定是否需要啟動預解析
+            was_empty = player.queue.empty()
 
             try:
                 # 解析音樂網址 (此操作較耗時)
@@ -314,6 +420,11 @@ class Music(commands.Cog):
                 for source_data in sources:
                     source_data['requester_mention'] = interaction.user.mention
                     await player.queue.put(source_data)
+
+                # 若原本隊列是空的，而且現在有正在播放的歌曲，代表這批是「當前之後第一批歌」，
+                # 這種情況觸發預解析可以有效減少 A 播完後到 B 開播之間的空檔。
+                if was_empty and player.voice_client and player.voice_client.is_playing():
+                    player.schedule_prefetch()
 
                 # 準備音樂加入隊列的訊息
                 if len(sources) > 1:
