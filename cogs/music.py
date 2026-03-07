@@ -229,13 +229,6 @@ class Music(commands.Cog):
             try:
                 await interaction.channel.send(**kwargs)
             except: pass
-            
-            # 關鍵：若 Interaction 已 Defer 但沒能成功結束，氣泡會卡住
-            # 嘗試手動刪除思考中氣泡 (即便 token 可能無效，試著清掉)
-            try:
-                if interaction.response.is_done():
-                    await interaction.delete_original_response()
-            except: pass
 
     async def join_logic(self, interaction: discord.Interaction, silent_if_inside: bool = False):
         """處理加入頻道訊息邏輯 (非回覆型式)"""
@@ -243,7 +236,7 @@ class Music(commands.Cog):
             success, message = await self.connect_voice(interaction, allow_move=True)
             if not success:
                 # 如果連接失敗，直接發送錯誤訊息
-                await self.safe_send_message(interaction, content=message, ephemeral=True)
+                await self.safe_send_message(interaction, content=message, ephemeral=False)
                 return False
             
             # 成功加入或移動時，給予回饋
@@ -252,7 +245,7 @@ class Music(commands.Cog):
             elif not silent_if_inside:
                 # 已在頻道中且非靜默模式，提示用戶
                 msg = ":x: 哎呀，我早就在這個頻道裡面等你囉！"
-                await self.safe_send_message(interaction, content=msg, ephemeral=True)
+                await self.safe_send_message(interaction, content=msg, ephemeral=False)
             
             return True
         except Exception as e:
@@ -260,72 +253,107 @@ class Music(commands.Cog):
             return False
 
     async def play_logic(self, interaction: discord.Interaction, song: str):
+        search_message = None
         try:
             # 立即 Defer 以顯示正在思考
             if not interaction.response.is_done():
-                try: await interaction.response.defer(ephemeral=False)
-                except: pass
+                try:
+                    await interaction.response.defer(ephemeral=False)
+                except:
+                    pass
 
             # 使用 connect_voice 來處理加入邏輯以獲得自定義的訊息控制
             success, join_message = await self.connect_voice(interaction, allow_move=True)
             if not success:
-                try: await interaction.delete_original_response()
-                except: pass
-                await interaction.followup.send(content=join_message, ephemeral=True)
+                await self.safe_send_message(interaction, content=join_message, ephemeral=False)
                 return
 
             is_new_join = bool(join_message)
-            if is_new_join:
-                # 若為新加入頻道，第一時間將思考泡泡替換成「已加入頻道」的訊息！
-                try: await interaction.edit_original_response(content=join_message)
-                except: pass
+
+            # 在真正開始解析音樂前，顯示「正在搜尋音樂中」提示
+            try:
+                if is_new_join:
+                    # 若為新加入頻道，先把原本思考泡泡換成「已加入頻道」，再另外送出一則搜尋訊息
+                    try:
+                        await interaction.edit_original_response(content=join_message)
+                    except:
+                        pass
+                    try:
+                        search_message = await interaction.followup.send(
+                            content=":mag_right: 正在搜尋音樂中...",
+                            ephemeral=False,
+                        )
+                    except:
+                        search_message = None
+                else:
+                    # 已經在頻道中，直接把思考泡泡改成搜尋提示，稍後會以編輯方式顯示成功或失敗
+                    try:
+                        search_message = await interaction.edit_original_response(
+                            content=":mag_right: 正在搜尋音樂中..."
+                        )
+                    except:
+                        search_message = None
+            except:
+                # 顯示搜尋提示失敗時，不影響後續播放流程
+                search_message = None
 
             player = self.get_player(interaction)
-            
+
             try:
                 # 解析音樂網址 (此操作較耗時)
                 sources = list(await YTDLSource.from_url(song, loop=self.bot.loop, stream=True))
-                
+
                 if not sources:
-                    if not is_new_join:
-                        try: await interaction.delete_original_response()
-                        except: pass
-                    return await interaction.followup.send(content=f":x: 抱歉，我翻遍了也找不到跟 **{song}** 相關的音樂耶...", ephemeral=True)
+                    error_text = f":x: 抱歉，我翻遍了也找不到跟 **{song}** 相關的音樂耶..."
+                    if search_message:
+                        await search_message.edit(content=error_text)
+                    else:
+                        await self.safe_send_message(interaction, content=error_text, ephemeral=False)
+                    return
 
                 for source_data in sources:
                     source_data['requester_mention'] = interaction.user.mention
                     await player.queue.put(source_data)
-                
+
                 # 準備音樂加入隊列的訊息
                 if len(sources) > 1:
                     queue_info = f":white_check_mark: `{interaction.user.display_name}` 一口氣點了 **{len(sources)}** 首音樂，已經通通塞進清單啦！"
                 else:
                     queue_info = f":white_check_mark: `{interaction.user.display_name}` 點的 **{sources[0].get('title', '未知')}** 已經加入隊列排隊囉！"
-                
-                if is_new_join:
-                    # 原本的泡泡已經是「加入頻道」了，所以不能覆蓋它，用 followup 追加這條加入播放的消息
-                    await interaction.followup.send(content=queue_info, ephemeral=False)
+
+                if search_message:
+                    # 成功解析後，以編輯方式替換原本的搜尋提示
+                    await search_message.edit(content=queue_info)
                 else:
-                    # 已經在頻道裡發的點歌：原本的泡泡還是「思考中...」，我們直接把它替換成「加入清單成功」
-                    try: await interaction.edit_original_response(content=queue_info)
-                    except: pass
-                
+                    # 後備方案：維持舊有的訊息行為
+                    if is_new_join:
+                        await interaction.followup.send(content=queue_info, ephemeral=False)
+                    else:
+                        try:
+                            await interaction.edit_original_response(content=queue_info)
+                        except:
+                            await self.safe_send_message(interaction, content=queue_info, ephemeral=False)
+
             except Exception as e:
                 error_msg = ":x: 嗚嗚，這個平台因為版權保護不支援喔。" if "DRM" in str(e) else ":x: 哎呀，這首歌的連結好像有點問題，我讀不到它的資訊耶！要不要換個連結試試看？"
-                if not is_new_join:
-                    try: await interaction.delete_original_response()
-                    except: pass
-                await interaction.followup.send(content=error_msg, ephemeral=True)
+                if search_message:
+                    await search_message.edit(content=error_msg)
+                else:
+                    await self.safe_send_message(interaction, content=error_msg, ephemeral=False)
         except Exception as e:
             error_msg = ":x: 嗚嗚，這個平台因為版權保護不支援喔。" if "DRM" in str(e) else ":x: 糟糕，解析這首歌的資訊時出了點差錯，我可能沒辦法播放它喔！"
-            try: await interaction.delete_original_response()
-            except: pass
-            await interaction.followup.send(content=error_msg, ephemeral=True)
+            try:
+                if search_message:
+                    await search_message.edit(content=error_msg)
+                else:
+                    await self.safe_send_message(interaction, content=error_msg, ephemeral=False)
+            except:
+                await self.safe_send_message(interaction, content=error_msg, ephemeral=False)
 
     async def skip_logic(self, interaction: discord.Interaction):
         try:
             if not interaction.guild.voice_client or not (interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused()):
-                return await self.safe_send_message(interaction, content=":x: 現在很安靜唷，沒有音樂可以跳過啦！", ephemeral=True)
+                return await self.safe_send_message(interaction, content=":x: 現在很安靜唷，沒有音樂可以跳過啦！", ephemeral=False)
             
             player = self.players.get(interaction.guild_id)
             title = player.current.title if player and player.current else "未知歌曲"
@@ -339,14 +367,14 @@ class Music(commands.Cog):
             
         except Exception as e:
             print("[skip_logic 錯誤]", e)
-            await self.safe_send_message(interaction, content=":x: 發生一點錯誤，請再試一次看看！", ephemeral=True)
+            await self.safe_send_message(interaction, content=":x: 發生一點錯誤，請再試一次看看！", ephemeral=False)
 
     async def stop_logic(self, interaction: discord.Interaction, message: str = None):
         if not message:
             message = f":wave: `{interaction.user.display_name}` 讓我先退下了，停止播放並退出頻道囉！"
         try:
             if not interaction.guild.voice_client:
-                return await self.safe_send_message(interaction, content=":x: 我現在不在頻道裡喔！", ephemeral=True)
+                return await self.safe_send_message(interaction, content=":x: 我現在不在頻道裡喔！", ephemeral=False)
             player = self.players.get(interaction.guild_id)
             if player:
                 player.destroy()
@@ -356,13 +384,13 @@ class Music(commands.Cog):
             await self.safe_send_message(interaction, content=message, ephemeral=False)
         except Exception as e:
             print("[stop_logic 錯誤]", e)
-            await self.safe_send_message(interaction, content=":x: 發生一點錯誤，請再試一次看看！", ephemeral=True)
+            await self.safe_send_message(interaction, content=":x: 發生一點錯誤，請再試一次看看！", ephemeral=False)
 
     async def clear_logic(self, interaction: discord.Interaction):
         try:
             player = self.players.get(interaction.guild_id)
             if not player or player.queue.empty():
-                return await self.safe_send_message(interaction, content=":x: 播放清單本來就是空的啦！", ephemeral=True)
+                return await self.safe_send_message(interaction, content=":x: 播放清單本來就是空的啦！", ephemeral=False)
             while not player.queue.empty():
                 try:
                     player.queue.get_nowait()
@@ -372,14 +400,14 @@ class Music(commands.Cog):
             await self.safe_send_message(interaction, content=msg, ephemeral=False)
         except Exception as e:
             print("[clear_logic 錯誤]", e)
-            await self.safe_send_message(interaction, content=":x: 發生一點錯誤，請再試一次看看！", ephemeral=True)
+            await self.safe_send_message(interaction, content=":x: 發生一點錯誤，請再試一次看看！", ephemeral=False)
 
     async def nowplaying_logic(self, interaction: discord.Interaction, source_data=None, current=None, incoming_player=None, silent=False):
         """處理正在播放的 Embed 和 View 生成，供 play 和 nowplaying 指令共用 (silent 為 True 可避免通知)"""
         try:
             player = incoming_player or self.players.get(interaction.guild_id)
             if not player or (not current and not player.current):
-                return await self.safe_send_message(interaction, content=":x: 目前沒有播放任何音樂喔。", ephemeral=True)
+                return await self.safe_send_message(interaction, content=":x: 目前沒有播放任何音樂喔。", ephemeral=False)
 
             curr = current or player.current
             data = source_data or curr.data
@@ -439,17 +467,14 @@ class Music(commands.Cog):
                 await self.safe_send_message(interaction, embed=embed, view=view)
         except Exception as e:
             print("[nowplaying_logic 錯誤]", e)
-            await self.safe_send_message(interaction, content=":x: 哎呀，我拿不到這首歌的播放資訊耶... 晚點再試試看好嗎？", ephemeral=True)
+            await self.safe_send_message(interaction, content=":x: 哎呀，我拿不到這首歌的播放資訊耶... 晚點再試試看好嗎？", ephemeral=False)
 
     async def queue_logic(self, interaction: discord.Interaction, page: int = 1):
         try:
             player = self.players.get(interaction.guild_id)
             if not player or player.queue.empty():
                 msg = ":x: 播放清單目前空空如也喔。"
-                if interaction.response.is_done():
-                    return await interaction.followup.send(msg, ephemeral=True)
-                else:
-                    return await interaction.response.send_message(msg, ephemeral=True)
+                return await self.safe_send_message(interaction, content=msg, ephemeral=False)
             
             upcoming = list(player.queue._queue)
             per_page = 10
@@ -457,7 +482,7 @@ class Music(commands.Cog):
             max_page = (total - 1) // per_page + 1
             
             if page < 1 or page > max_page:
-                return await interaction.response.send_message(f":x: 頁數超出範圍囉，請輸入 1 ~ {max_page} 之間的數字。", ephemeral=True)
+                return await interaction.response.send_message(f":x: 頁數超出範圍囉，請輸入 1 ~ {max_page} 之間的數字。", ephemeral=False)
             
             # 定義分頁 View (已加入 Emoji 和清空按鈕)
             class QueueView(discord.ui.View):
@@ -511,7 +536,7 @@ class Music(commands.Cog):
         except Exception as e:
             print("[queue_logic 錯誤]", e)
             if not interaction.response.is_done():
-                await interaction.response.send_message(":x: 發生一點錯誤，請再試一次看看！", ephemeral=True)
+                await interaction.response.send_message(":x: 發生一點錯誤，請再試一次看看！", ephemeral=False)
 
     # --- 斜線指令宣言 (Slash Commands) ---
 
