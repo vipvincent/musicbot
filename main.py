@@ -28,7 +28,6 @@ class MusicBot(commands.Bot):
 
     async def on_ready(self):
         print(f"機器人已上線：{self.user} (ID: {self.user.id})")
-        print("------")
 
 if __name__ == "__main__":
     bot = MusicBot()
