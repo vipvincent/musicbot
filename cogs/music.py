@@ -210,20 +210,21 @@ class Music(commands.Cog):
                     await interaction.followup.send(message, ephemeral=True)
                 return False
             
-            if message:
-                if not interaction.response.is_done():
-                    if interaction.type == discord.InteractionType.application_command:
-                        await interaction.response.defer(ephemeral=True)
-                        await interaction.delete_original_response()
-                    else:
-                        await interaction.response.defer()
-                await interaction.channel.send(message)
+            # 成功加入時更新消息
+            if message and not interaction.response.is_done():
+                # 直接回應交互（避免 defer 后删除导致的错误）
+                await interaction.response.send_message(message, ephemeral=False)
+            elif message:
+                # 交互已被处理，使用 followup
+                await interaction.followup.send(message, ephemeral=False)
+            elif not silent_if_inside and not interaction.response.is_done():
+                # 已在频道中，非静默模式则提示
+                msg = ":x: 機器人已經在此頻道中了。"
+                await interaction.response.send_message(msg, ephemeral=True)
             elif not silent_if_inside:
-                msg = "機器人已經在此頻道中了。"
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(msg, ephemeral=True)
-                else:
-                    await interaction.followup.send(msg, ephemeral=True)
+                # 交互已处理，使用 followup
+                msg = ":x: 機器人已經在此頻道中了。"
+                await interaction.followup.send(msg, ephemeral=True)
             return True
         except Exception as e:
             print("[join_logic 錯誤]", e)
@@ -248,14 +249,11 @@ class Music(commands.Cog):
                 else:
                     queue_info = f":white_check_mark: 已加入隊列：**{sources[0].get('title', '未知')}**"
                 
-                # 發送獨立的隊列訊息
+                # 發送隊列訊息（交互處理）
                 if not interaction.response.is_done():
-                    if interaction.type == discord.InteractionType.application_command:
-                        await interaction.response.defer(ephemeral=True)
-                        await interaction.delete_original_response()
-                    else:
-                        await interaction.response.defer()
-                await interaction.channel.send(queue_info)
+                    await interaction.response.send_message(queue_info, ephemeral=False)
+                else:
+                    await interaction.followup.send(queue_info, ephemeral=False)
             except Exception as e:
                 print("[play_logic 內部錯誤]", e)
                 msg = ":x: 播放時發生錯誤，請稍後再試。"
@@ -276,20 +274,17 @@ class Music(commands.Cog):
             
             interaction.guild.voice_client.stop()
             
-            msg = f"已跳過 **{title}** 歌曲。"
+            msg = f":track_next: 已跳過 **{title}** 歌曲。"
             if not interaction.response.is_done():
-                if interaction.type == discord.InteractionType.application_command:
-                    await interaction.response.defer(ephemeral=True)
-                    await interaction.delete_original_response()
-                else:
-                    await interaction.response.defer()
-            await interaction.channel.send(msg)
+                await interaction.response.send_message(msg, ephemeral=False)
+            else:
+                await interaction.followup.send(msg, ephemeral=False)
         except Exception as e:
             print("[skip_logic 錯誤]", e)
             if not interaction.response.is_done():
                 await interaction.response.send_message(":x: 發生錯誤，請稍後再試。", ephemeral=True)
 
-    async def stop_logic(self, interaction: discord.Interaction, message: str = ":white_check_mark: 已停止播放並離開頻道。"):
+    async def stop_logic(self, interaction: discord.Interaction, message: str = ":wave: 已停止播放並離開頻道。"):
         try:
             if not interaction.guild.voice_client:
                 return await interaction.response.send_message(":x: 機器人不在語音頻道中。", ephemeral=True)
@@ -299,14 +294,11 @@ class Music(commands.Cog):
             else:
                 await interaction.guild.voice_client.disconnect()
             
-            # 直接發送訊息
+            # 直接回應訊息
             if not interaction.response.is_done():
-                if interaction.type == discord.InteractionType.application_command:
-                    await interaction.response.defer(ephemeral=True)
-                    await interaction.delete_original_response()
-                else:
-                    await interaction.response.defer()
-            await interaction.channel.send(message)
+                await interaction.response.send_message(message, ephemeral=False)
+            else:
+                await interaction.followup.send(message, ephemeral=False)
         except Exception as e:
             print("[stop_logic 錯誤]", e)
             if not interaction.response.is_done():
@@ -322,15 +314,12 @@ class Music(commands.Cog):
                     player.queue.get_nowait()
                 except: break
             
-            # 直接發送訊息
+            # 直接回應訊息
             msg = ":white_check_mark: 已清空播放清單。"
             if not interaction.response.is_done():
-                if interaction.type == discord.InteractionType.application_command:
-                    await interaction.response.defer(ephemeral=True)
-                    await interaction.delete_original_response()
-                else:
-                    await interaction.response.defer()
-            await interaction.channel.send(msg)
+                await interaction.response.send_message(msg, ephemeral=False)
+            else:
+                await interaction.followup.send(msg, ephemeral=False)
         except Exception as e:
             print("[clear_logic 錯誤]", e)
             if not interaction.response.is_done():
@@ -389,16 +378,19 @@ class Music(commands.Cog):
 
                 @discord.ui.button(label="離開", emoji="🚪", style=discord.ButtonStyle.danger, custom_id="music_leave")
                 async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    await self.music_cog.stop_logic(interaction, message="已離開語音頻道。")
+                    await self.music_cog.stop_logic(interaction, message=":wave: 已離開語音頻道。")
 
             view = NowPlayingView(self, interaction.guild_id)
-            if not interaction.response.is_done():
-                if interaction.type == discord.InteractionType.application_command:
-                    await interaction.response.defer(ephemeral=True)
-                    await interaction.delete_original_response()
+            
+            # 當 silent=True 時（player_loop 調用），發送訊息但不觸發通知
+            if silent:
+                await interaction.channel.send(embed=embed, view=view, silent=True)
+            else:
+                # 正常的指令調用，需要回應交互
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
                 else:
-                    await interaction.response.defer()
-            await interaction.channel.send(embed=embed, view=view, silent=silent)
+                    await interaction.followup.send(embed=embed, view=view, ephemeral=False)
         except Exception as e:
             print("[nowplaying_logic 錯誤]", e)
             if not interaction.response.is_done():
@@ -410,7 +402,7 @@ class Music(commands.Cog):
             if not player or player.queue.empty():
                 msg = ":x: 目前隊列是空的。"
                 if interaction.response.is_done():
-                    return await interaction.channel.send(msg)
+                    return await interaction.followup.send(msg, ephemeral=True)
                 else:
                     return await interaction.response.send_message(msg, ephemeral=True)
             
@@ -468,12 +460,9 @@ class Music(commands.Cog):
             
             view = QueueView(upcoming, page, max_page, self)
             if not interaction.response.is_done():
-                if interaction.type == discord.InteractionType.application_command:
-                    await interaction.response.defer(ephemeral=True)
-                    await interaction.delete_original_response()
-                else:
-                    await interaction.response.defer()
-            await interaction.channel.send(embed=embed, view=view)
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
+            else:
+                await interaction.followup.send(embed=embed, view=view, ephemeral=False)
         except Exception as e:
             print("[queue_logic 錯誤]", e)
             if not interaction.response.is_done():
@@ -509,6 +498,11 @@ class Music(commands.Cog):
     @app_commands.command(name="queue", description="查看當前待播放清單")
     @app_commands.describe(page="要查看的頁數")
     async def queue_info(self, interaction: discord.Interaction, page: int = 1):
+        await self.queue_logic(interaction, page)
+
+    @app_commands.command(name="playlist", description="查看當前待播放清單")
+    @app_commands.describe(page="要查看的頁數")
+    async def playlist(self, interaction: discord.Interaction, page: int = 1):
         await self.queue_logic(interaction, page)
 
     @app_commands.command(name="clear", description="清空播放清單")
