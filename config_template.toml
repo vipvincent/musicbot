@@ -1,12 +1,7 @@
-[bot]
+[token]
 # Discord 機器人 Token
-token = "YOUR_DISCORD_BOT_TOKEN"
+dcbot = "YOUR_DISCORD_BOT_TOKEN"
 
 [paths]
-# ffmpeg 檔案目錄
-ffmpeg = "ffmpeg/"
-
-[ffmpeg_options]
-# ffmpeg 參數
-before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-options = "-vn -b:a 192k -bufsize 512k -threads 2 -loglevel panic"
+# ffmpeg 執行檔路徑
+ffmpeg = "ffmpeg/ffmpeg.exe"

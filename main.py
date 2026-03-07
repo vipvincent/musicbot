@@ -7,7 +7,7 @@ import tomllib
 with open("config.toml", "rb") as f:
     config = tomllib.load(f)
 
-TOKEN = config["bot"]["token"]
+TOKEN = config["token"]["dcbot"]
 
 class MusicBot(commands.Bot):
     def __init__(self):
