@@ -17,25 +17,20 @@ if not os.path.isabs(FFMPEG_PATH) and ('/' in FFMPEG_PATH or '\\' in FFMPEG_PATH
     FFMPEG_PATH = os.path.join(BASE_DIR, FFMPEG_PATH)
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -analyzeduration 0 -probesize 32',
-    'options': '-vn -ar 48000 -ac 2 -b:a 192k -threads 2 -loglevel panic',
+    'before_options': '-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
+    'options': '-vn -loglevel panic',
     'executable': FFMPEG_PATH
 }
 
 # YTDL 提取器設定
 ytdl_format_options = {
     'format': 'bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': False,  # 改為 False 以支援播放清單
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
+    'noplaylist': False,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'auto',
-    'source_address': '0.0.0.0', # 綁定到 ipv4
-    'extract_flat': 'in_playlist', # 本地提取播放清單元數據，加速反應
+    'source_address': '0.0.0.0',
+    'extract_flat': 'in_playlist',
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
@@ -47,7 +42,6 @@ ytdl_full_options = {
     'quiet': True,
     'no_warnings': True,
     'source_address': '0.0.0.0',
-    'nocheckcertificate': True,
 }
 ytdl_full = yt_dlp.YoutubeDL(ytdl_full_options)
 
@@ -118,18 +112,20 @@ class MusicPlayer:
                 if not self.voice_client or not self.voice_client.is_connected():
                     break
 
-                # 獲取真正的流地址
+                # 獲取播放資訊中的網址
                 url = source_data.get('url')
-                # 如果是從 flat playlist 來的，或者指向 YouTube 網址
-                if not url or 'youtube.com' in url or 'youtu.be' in url or not url.startswith('http'):
+                # 如果網址無效、或是來自 YouTube (通常需要新鮮的串流網址)
+                if not url or any(x in url for x in ['youtube.com', 'youtu.be', 'googlevideo.com']) or not url.startswith('http'):
                     target = source_data.get('webpage_url') or source_data.get('url')
                     # 如果 target 看起來只是 ID，重建完整網址以提升識別率
                     if target and not target.startswith('http'):
                         target = f"https://www.youtube.com/watch?v={target}"
+                    
+                    # 獲取新鮮的 stream URL
                     url = await YTDLSource.get_direct_url(target, self.loop)
 
                 if not url:
-                    await self.interaction.channel.send(f"⚠️ 無法讀取歌曲: **{source_data.get('title', '未知')}**，跳過中。")
+                    await self.interaction.channel.send(f":x: 哎呀，我拿不到 **{source_data.get('title', '未知')}** 的播放資訊耶，這首可能要先跳過囉！")
                     continue
 
                 source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
@@ -152,7 +148,7 @@ class MusicPlayer:
                 pass
             except Exception as e:
                 print("[播放時發生錯誤]", e)
-                await self.interaction.channel.send(":x: 播放時發生錯誤，請稍後再試。")
+                await self.interaction.channel.send(":x: 嗚嗚，我拿不到這首歌的播放資訊耶，暫時沒辦法唱給你聽喔！")
             
             self.current = None
 
@@ -315,13 +311,13 @@ class Music(commands.Cog):
                     except: pass
                 
             except Exception as e:
-                error_msg = ":x: 嗚嗚，這個平台因為版權保護不支援喔。" if "DRM" in str(e) else ":x: 哎呀，播放的時候出了一點小狀況，晚點再試試好嗎？"
+                error_msg = ":x: 嗚嗚，這個平台因為版權保護不支援喔。" if "DRM" in str(e) else ":x: 哎呀，這首歌的連結好像有點問題，我讀不到它的資訊耶！要不要換個連結試試看？"
                 if not is_new_join:
                     try: await interaction.delete_original_response()
                     except: pass
                 await interaction.followup.send(content=error_msg, ephemeral=True)
         except Exception as e:
-            error_msg = ":x: 嗚嗚，這個平台因為版權保護不支援喔。" if "DRM" in str(e) else ":x: 糟糕，遇到預期外的錯誤了！"
+            error_msg = ":x: 嗚嗚，這個平台因為版權保護不支援喔。" if "DRM" in str(e) else ":x: 糟糕，解析這首歌的資訊時出了點差錯，我可能沒辦法播放它喔！"
             try: await interaction.delete_original_response()
             except: pass
             await interaction.followup.send(content=error_msg, ephemeral=True)
@@ -443,7 +439,7 @@ class Music(commands.Cog):
                 await self.safe_send_message(interaction, embed=embed, view=view)
         except Exception as e:
             print("[nowplaying_logic 錯誤]", e)
-            await self.safe_send_message(interaction, content=":x: 拿不到這首歌的播放資訊耶...", ephemeral=True)
+            await self.safe_send_message(interaction, content=":x: 哎呀，我拿不到這首歌的播放資訊耶... 晚點再試試看好嗎？", ephemeral=True)
 
     async def queue_logic(self, interaction: discord.Interaction, page: int = 1):
         try:
