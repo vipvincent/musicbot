@@ -23,41 +23,34 @@ FFMPEG_OPTIONS = {
 }
 
 
-# YTDL 提取器設定
-ytdl_format_options = {
-    # 優先使用 Opus 音軌，若無再退回一般 bestaudio
-    'format': 'bestaudio[acodec=opus]/bestaudio/best',
-    'noplaylist': False,
+# 核心 YTDL 共用設定
+BASE_YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'auto',
     'source_address': '0.0.0.0',
-    'extract_flat': 'in_playlist',
+    'default_search': 'auto',
 }
 
+# 用於初步獲取資訊的選項 (預設支援播放清單快速獲取)
+ytdl_format_options = BASE_YTDL_OPTIONS.copy()
+ytdl_format_options.update({
+    'noplaylist': False,
+    'extract_flat': 'in_playlist',
+})
 
 # 用於獲取真正直接流網址的提取器 (不使用 flat 模式)
-ytdl_full_options = {
-    # [Bug Fix] 移除強制 opus，改為最穩定的 bestaudio，減少 YouTube 阻擋 (403 或 Age Restriction)
-    'format': 'bestaudio/best',
+ytdl_full_options = BASE_YTDL_OPTIONS.copy()
+ytdl_full_options.update({
     'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'source_address': '0.0.0.0',
-}
+})
 
 def _extract_info_in_process(query, download=False, options=None):
     """
     在獨立子進程中運行的解析函數。
     """
     if options is None:
-        options = {
-            'format': 'bestaudio[acodec=opus]/bestaudio/best',
-            'noplaylist': False,
-            'quiet': True,
-            'no_warnings': True,
-            'source_address': '0.0.0.0',
-        }
+        options = ytdl_format_options.copy()
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
             return ydl.extract_info(query, download=download)
@@ -93,15 +86,9 @@ class YTDLSource(discord.AudioSource):
         if not search.startswith(('http://', 'https://')):
             search = f"ytsearch1:{search}"
             
-        # 根據輸入內容動態決定是否使用 extract_flat
-        parse_options = {
-            'format': 'bestaudio[acodec=opus]/bestaudio/best',
-            'noplaylist': False,
-            'quiet': True,
-            'no_warnings': True,
-            'default_search': 'auto',
-            'source_address': '0.0.0.0',
-        }
+        # 以基礎選項為底本
+        parse_options = BASE_YTDL_OPTIONS.copy()
+        parse_options['noplaylist'] = False
         
         # [Bug Fix] 播放清單使用 extract_flat 快速取得目錄；單曲/搜尋則完整解析以取得標題
         if 'list=' in search:
@@ -242,14 +229,10 @@ class MusicPlayer:
                     await self.interaction.channel.send(f":x: 哎呀，我拿不到 **{source_data.get('title', '未知')}** 的播放資訊耶，這首可能要先跳過囉！")
                     continue
 
-                # 使用 FFmpeg 直接產生 Opus 音訊，避免 Discord 端再次轉碼
-                # 這裡指定自訂的 probe 函數，以解決 discord.py 的預設探測方法把原始 bitrate 放大導致超出 libopus 上限 (512k) 的問題
-                def custom_probe(src, exe):
-                    codec, br = discord.FFmpegOpusAudio._probe_codec_fallback(src, exe)
-                    # _probe_codec_fallback 會錯誤地套用 max(br, 512)，因此我們這裡用 min 強制其不高於 512
-                    return codec, min(br, 512) if br else 384
-
-                source = await discord.FFmpegOpusAudio.from_probe(url, method=custom_probe, **FFMPEG_OPTIONS)
+                # 改為使用 FFmpegPCMAudio，不使用 from_probe (原為拷貝 Opus)。
+                # 這樣原本高潮處 (VBR 飆高突波) 的音訊封包就不會因為超出 Discord 網路上限而被丟棄 (導致卡頓)。
+                # PCM 會交由 discord.py 的語音客戶端嚴格按照頻道的標準重新編碼與發送，播放會更加穩定順暢。
+                source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
                 self.current = YTDLSource(source, data=source_data)
 
                 # [Bug Fix] 明確綁定當前的 Event 到 lambda 中，防止競爭條件導致「連跳兩首」
@@ -365,7 +348,7 @@ class Music(commands.Cog):
             await interaction.guild.voice_client.move_to(channel)
             return True, f":sound: `{interaction.user.display_name}` 把我拉過來囉！已移動至：**{channel.name}**"
         else:
-            return False, ":x: 不好意思，我已經在另一個頻道當 DJ 囉！"
+            return False, f":x: 不好意思，我已經在 **{interaction.guild.voice_client.channel.name}** 當 DJ 囉！"
 
     # --- 邏輯處理方法 (Logic Methods) ---
 
@@ -441,8 +424,8 @@ class Music(commands.Cog):
                 except:
                     pass
 
-            # 處理加入語音頻道
-            success, join_message = await self.connect_voice(interaction, allow_move=True)
+            # 處理加入語音頻道，play 預設不強制幫用戶把機器人從其他頻道拉過來，避免干擾別人
+            success, join_message = await self.connect_voice(interaction, allow_move=False)
             if not success:
                 await self.safe_send_message(interaction, content=join_message, ephemeral=False)
                 return
