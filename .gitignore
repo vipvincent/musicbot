@@ -7,8 +7,8 @@ env/
 venv/
 .venv/
 
-# ffmpeg
-ffmpeg/
+# external tools
+external/
 
 # Logs and OS specific
 *.log
