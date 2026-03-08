@@ -9,10 +9,11 @@ load_dotenv()
 
 # 手動初始化日誌系統 (因為改用了 asyncio.run，系統不會預設開啟)
 discord.utils.setup_logging(level=logging.INFO, root=False)
+# [Bug Fix] 忽略 discord.player 的 INFO 層級日誌，避免 FFmpeg 正常退出的 -22 代碼 (4294967274) 洗版
+logging.getLogger('discord.player').setLevel(logging.WARNING)
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-import asyncio
 
 class MusicBot(commands.Bot):
     def __init__(self):
@@ -36,28 +37,11 @@ class MusicBot(commands.Bot):
         if music_cog:
             self.add_view(NowPlayingView(music_cog, guild_id=None))
 
-    async def close(self):
-        """機器人關閉時觸發的清理動作"""
-        print("\n[系統] 正在關閉機器人並清理資源...")
-        # 這裡會觸發所有 Cog 的 cog_unload
-        await super().close()
-        
-        # [Bug Fix] 強制取消所有剩餘的異步任務，防止退出時卡住
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        [task.cancel() for task in tasks]
-        if tasks:
-            print(f"[系統] 正在清理 {len(tasks)} 個剩餘任務...")
-            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def on_ready(self):
         print(f"[系統] 機器人已上線：{self.user} (ID: {self.user.id})")
 
 if __name__ == "__main__":
     bot = MusicBot()
-    
-    try:
-        asyncio.run(bot.start(TOKEN))
-    except KeyboardInterrupt:
-        pass
-    finally:
-        print("[系統] 機器人已安全關閉。")
+    # log_handler=None 避免 bot.run() 重複初始化日誌（我們已在頂部手動設定）
+    bot.run(TOKEN, log_handler=None)

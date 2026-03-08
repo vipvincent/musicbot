@@ -17,8 +17,8 @@ if not os.path.isabs(FFMPEG_PATH) and ('/' in FFMPEG_PATH or '\\' in FFMPEG_PATH
     FFMPEG_PATH = os.path.join(BASE_DIR, FFMPEG_PATH)
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -thread_queue_size 8192',
-    'options': '-vn -loglevel warning',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
+    'options': '-vn',
     'executable': FFMPEG_PATH
 }
 
@@ -38,8 +38,8 @@ ytdl_format_options = {
 
 # 用於獲取真正直接流網址的提取器 (不使用 flat 模式)
 ytdl_full_options = {
-    # 同樣優先選擇 Opus
-    'format': 'bestaudio[acodec=opus]/bestaudio/best',
+    # [Bug Fix] 移除強制 opus，改為最穩定的 bestaudio，減少 YouTube 阻擋 (403 或 Age Restriction)
+    'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
@@ -87,7 +87,7 @@ class YTDLSource(discord.AudioSource):
             print(f"[YTDLSource 清理錯誤]: {e}")
 
     @classmethod
-    async def from_url(cls, search: str, *, loop=None, stream=True):
+    async def from_url(cls, search: str, *, loop=None, executor=None, stream=True):
         loop = loop or asyncio.get_running_loop()
         
         if not search.startswith(('http://', 'https://')):
@@ -108,7 +108,8 @@ class YTDLSource(discord.AudioSource):
             parse_options['extract_flat'] = 'in_playlist'
 
         try:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+            # 使用傳入的持久化 executor，如果沒有則按需建立 (後備方案)
+            if executor:
                 data = await loop.run_in_executor(
                     executor, 
                     _extract_info_in_process, 
@@ -116,14 +117,25 @@ class YTDLSource(discord.AudioSource):
                     not stream, 
                     parse_options
                 )
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as new_executor:
+                    data = await loop.run_in_executor(
+                        new_executor, 
+                        _extract_info_in_process, 
+                        search, 
+                        not stream, 
+                        parse_options
+                    )
         except Exception as e:
             print(f"[進程解析錯誤]: {e}")
             return []
 
-        if not data or isinstance(data, dict) and '_error' in data:
-            if data and '_error' in data:
-                print(f"[解析錯誤]: {data['_error']}")
+        if not data:
             return []
+
+        if isinstance(data, dict) and '_error' in data:
+            # 拋出異常，讓 play_logic 的 except 區塊去處理錯誤訊息發送
+            raise Exception(data['_error'])
 
         if 'entries' in data:
             entries = data['entries']
@@ -133,14 +145,13 @@ class YTDLSource(discord.AudioSource):
         return entries
 
     @staticmethod
-    async def get_direct_url(target_url, loop):
+    async def get_direct_url(target_url, loop, executor=None):
         """獲取直接串流地址 (真正可播放的網址)"""
         if not target_url:
             return None
         
-        # 【按需啟動進程】獲取直接網址時也是用完即關閉
         try:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+            if executor:
                 data = await loop.run_in_executor(
                     executor, 
                     _extract_info_in_process, 
@@ -148,21 +159,40 @@ class YTDLSource(discord.AudioSource):
                     False, 
                     ytdl_full_options
                 )
-                if not data or (isinstance(data, dict) and '_error' in data):
-                    return None
-                return data.get('url')
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as new_executor:
+                    data = await loop.run_in_executor(
+                        new_executor, 
+                        _extract_info_in_process, 
+                        target_url, 
+                        False, 
+                        ytdl_full_options
+                    )
+            # [Bug Fix] 這個判斷與回傳必須放在 if/else 外面，否則有 executor 時會回傳 None
+            if not data:
+                print(f"[獲取直接 URL 失敗]: 拿不到任何資料 (target: {target_url})")
+                return None
+            if isinstance(data, dict) and '_error' in data:
+                print(f"[獲取直接 URL youtube-dl 錯誤]: {data['_error']} (target: {target_url})")
+                return None
+            
+            url = data.get('url')
+            if not url:
+                print(f"[獲取直接 URL 失敗]: 資料中沒有包含 url 欄位! (target: {target_url})")
+            return url
         except Exception as e:
-            print(f"[獲取直接 URL 錯誤]: {e}")
+            print(f"[獲取直接 URL 呼叫異常]: {e}")
             return None
 
 class MusicPlayer:
-    def __init__(self, interaction: discord.Interaction):
+    def __init__(self, interaction: discord.Interaction, executor):
         self.interaction = interaction
+        self.executor = executor
         self.queue = asyncio.Queue()
         self.next = asyncio.Event()
         self.current = None
         self.voice_client = interaction.guild.voice_client
-        self.loop = asyncio.get_event_loop()
+        self.loop = interaction.client.loop
         self._destroying = False # 新增：防止重複執行 destroy
         self.player_task = self.loop.create_task(self.player_loop())
 
@@ -170,11 +200,12 @@ class MusicPlayer:
         await self.interaction.client.wait_until_ready()
 
         while not self.interaction.client.is_closed():
-            self.next.clear()
+            # [Bug Fix] 每次迴圈重新建立 Event，避免舊歌的 delayed callback 污染新歌的狀態
+            self.next = asyncio.Event()
 
             try:
-                # 等待下一首歌，如果 30 分鐘沒動靜就離開
-                async with asyncio.timeout(1800):
+                # 等待下一首歌，如果 5 分鐘沒動靜就離開
+                async with asyncio.timeout(300):
                     source_data = await self.queue.get()
             except (asyncio.TimeoutError, TimeoutError):
                 # 超時離開的通知
@@ -182,8 +213,6 @@ class MusicPlayer:
                     await self.interaction.channel.send("⏰ 偵測到長時間未播放音樂，機器人已自動離開語音頻道。")
                 except:
                     pass
-                return self.destroy()
-            except asyncio.CancelledError:
                 return self.destroy()
 
             try:
@@ -200,11 +229,14 @@ class MusicPlayer:
                     if target and not str(target).startswith('http'):
                         target = f"https://www.youtube.com/watch?v={target}"
                     
-                    # 獲取新鮮的 stream URL
+                    # 獲取新鮮的 stream URL (加入重試機制抵抗偶發的 YouTube 限制)
+                    url = None
                     if target:
-                        url = await YTDLSource.get_direct_url(target, self.loop)
-                    else:
-                        url = None
+                        for _ in range(2):
+                            url = await YTDLSource.get_direct_url(target, self.loop, self.executor)
+                            if url:
+                                break
+                            await asyncio.sleep(1.5)
 
                 if not url:
                     await self.interaction.channel.send(f":x: 哎呀，我拿不到 **{source_data.get('title', '未知')}** 的播放資訊耶，這首可能要先跳過囉！")
@@ -215,7 +247,9 @@ class MusicPlayer:
                 source = await discord.FFmpegOpusAudio.from_probe(url, method='fallback', **FFMPEG_OPTIONS)
                 self.current = YTDLSource(source, data=source_data)
 
-                self.voice_client.play(self.current, after=lambda _: self.loop.call_soon_threadsafe(self.next.set))
+                # [Bug Fix] 明確綁定當前的 Event 到 lambda 中，防止競爭條件導致「連跳兩首」
+                current_event = self.next
+                self.voice_client.play(self.current, after=lambda _, e=current_event: self.loop.call_soon_threadsafe(e.set))
                                 
                 # [Bug Fix] 使用 try-except 包裹訊息發送，防止發送失敗導致 current_task 被取消而跳過音樂
                 try:
@@ -225,7 +259,14 @@ class MusicPlayer:
                 except Exception as msg_e:
                     print(f"[正在播放訊息發送失敗 (不影響播放)]: {msg_e}")
 
-                await self.next.wait()
+                # [Bug Fix] 每 5 秒檢查一次播放狀態的循環保護
+                while True:
+                    try:
+                        await asyncio.wait_for(current_event.wait(), timeout=5.0)
+                        break
+                    except (asyncio.TimeoutError, asyncio.exceptions.TimeoutError):
+                        if not self.voice_client.is_playing() and not self.voice_client.is_paused():
+                            break
             except Exception as e:
                 print("[播放時發生錯誤]", e)
                 await self.interaction.channel.send(":x: 嗚嗚，我拿不到這首歌的播放資訊耶，暫時沒辦法唱給你聽喔！")
@@ -296,30 +337,11 @@ class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.players = {}
+        # 改用 ThreadPoolExecutor 避免 ProcessPool 崩潰導致的連鎖失效 (跳歌 Bug 根本原因)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
-    async def cog_unload(self):
-        """當 Cog 被卸載 (如機器人關閉) 時，清理所有播放器資源"""
-        print(f"[Music Cog] 正在清理 {len(self.players)} 個活躍播放器...")
-        
-        # 1. 先清理所有播放器（停止 FFmpeg、取消任務）
-        player_list = list(self.players.values())
-        for player in player_list:
-            try:
-                player.destroy()
-            except Exception as e:
-                print(f"[清理播放器失敗]: {e}")
-        self.players.clear()
 
-        # 2. [Bug Fix] 確保所有語音連線都被正確斷開
-        #    destroy() 使用 create_task 排程斷開，可能來不及執行
-        #    這裡直接 await 斷開所有殘留的語音連線
-        for vc in list(self.bot.voice_clients):
-            try:
-                await vc.disconnect(force=True)
-            except Exception as e:
-                print(f"[斷開語音連線失敗]: {e}")
-        
-        print("[Music Cog] 清理完畢。")
+
 
     async def connect_voice(self, interaction: discord.Interaction, allow_move: bool = False):
         """輔助方法：處理語音頻道連接與移動邏輯"""
@@ -353,7 +375,7 @@ class Music(commands.Cog):
             # 若任務已結束，則執行清理並重新建立
             player.destroy()
 
-        player = MusicPlayer(interaction)
+        player = MusicPlayer(interaction, self.executor)
         self.players[interaction.guild_id] = player
         return player
 
@@ -437,15 +459,15 @@ class Music(commands.Cog):
                 search_message = None
 
             player = self.get_player(interaction)
-            # 解析音樂網址 (此操作較耗時)
-            sources = list(await YTDLSource.from_url(song, loop=asyncio.get_event_loop(), stream=True))
+            # 解析音樂網址 (使用常駐進程池提升速度)
+            sources = list(await YTDLSource.from_url(song, loop=self.bot.loop, executor=self.executor, stream=True))
 
             # [Bug Fix] 過濾掉播放清單中的無效項目（被刪除或私人影片會是 None）
             sources = [s for s in sources if s is not None]
 
             if not sources:
                 await self._update_search_message(interaction, search_message,
-                    f":x: 抱歉，我翻遍了也找不到跟 **{song}** 相關的音樂耶...")
+                    f":x: 抱歉，我翻遍了也找不到跟 `{song}` 相關的音樂耶...")
                 return
 
             for source_data in sources:
