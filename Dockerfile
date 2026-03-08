@@ -5,6 +5,7 @@ WORKDIR /app
 
 # 環境設定
 ENV TZ="Asia/Taipei"
+ENV FFMPEG_PATH="/usr/bin/ffmpeg"
 
 # 安裝 ffmpeg 和必要的系統依賴
 RUN apt-get update && \
