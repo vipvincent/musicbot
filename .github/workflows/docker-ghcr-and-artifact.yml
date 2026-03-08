@@ -1,0 +1,72 @@
+name: Docker Build and Push to GHCR
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 登入 GitHub Container Registry
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 1. 提取元數據並強制將名稱轉為小寫
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+
+      # 2. 第一次 Build：推送到 GHCR (支援快取)
+      - name: Build and push to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 3. 第二次 Build：載入到本地 Docker Daemon (利用快取，速度極快)
+      # 解決 push:true 與 load:true 無法同時存在的問題
+      - name: Build and load for Artifact
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+
+      # 4. 將映像檔打包成 .tar 檔案
+      - name: Save Docker image as tar
+        run: |
+          # 取得第一個 tag 作為存檔名稱
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          docker save "$FIRST_TAG" > image-backup.tar
+
+      # 5. 上傳至 GitHub Actions Artifacts (預設保存 90 天)
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-backup
+          path: image-backup.tar
