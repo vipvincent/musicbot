@@ -5,6 +5,7 @@ import asyncio
 from dotenv import load_dotenv
 import os
 import yt_dlp
+import concurrent.futures
 
 # 載入 .env 檔案
 load_dotenv()
@@ -16,8 +17,8 @@ if not os.path.isabs(FFMPEG_PATH) and ('/' in FFMPEG_PATH or '\\' in FFMPEG_PATH
     FFMPEG_PATH = os.path.join(BASE_DIR, FFMPEG_PATH)
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -thread_queue_size 4096',
-    'options': '-vn -loglevel panic',
+    'before_options': '-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -thread_queue_size 8192',
+    'options': '-vn -loglevel warning',
     'executable': FFMPEG_PATH
 }
 
@@ -34,7 +35,6 @@ ytdl_format_options = {
     'extract_flat': 'in_playlist',
 }
 
-ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
 # 用於獲取真正直接流網址的提取器 (不使用 flat 模式)
 ytdl_full_options = {
@@ -45,7 +45,26 @@ ytdl_full_options = {
     'no_warnings': True,
     'source_address': '0.0.0.0',
 }
-ytdl_full = yt_dlp.YoutubeDL(ytdl_full_options)
+
+def _extract_info_in_process(query, download=False, options=None):
+    """
+    在獨立子進程中運行的解析函數。
+    """
+    if options is None:
+        options = {
+            'format': 'bestaudio[acodec=opus]/bestaudio/best',
+            'noplaylist': False,
+            'quiet': True,
+            'no_warnings': True,
+            'source_address': '0.0.0.0',
+        }
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            return ydl.extract_info(query, download=download)
+    except Exception as e:
+        # [Bug Fix] 不要讓 Exception 直接拋回主進程（這會導致 Pickle 錯誤）
+        # 返回一個包含錯誤訊息的字典，讓主進程去處理
+        return {"_error": str(e)}
 
 class YTDLSource(discord.AudioSource):
     def __init__(self, source, *, data):
@@ -56,15 +75,12 @@ class YTDLSource(discord.AudioSource):
         self.url = data.get('url')
 
     def read(self):
-        # 直接轉交給內部來源，不再進行 PCM 音量處理，確保 Opus 位元流不被破壞
         return self.source.read()
 
     def is_opus(self):
-        # 若內部來源已經是 Opus，讓 VoiceClient 直接傳送而不重新編碼
         return getattr(self.source, "is_opus", lambda: False)()
 
     def cleanup(self):
-        # 當 VoiceClient 停止播放時，確保同時關閉深層的 FFmpeg 進程
         try:
             self.source.cleanup()
         except Exception as e:
@@ -74,17 +90,42 @@ class YTDLSource(discord.AudioSource):
     async def from_url(cls, search: str, *, loop=None, stream=True):
         loop = loop or asyncio.get_running_loop()
         
-        # 決定搜尋方式
         if not search.startswith(('http://', 'https://')):
             search = f"ytsearch1:{search}"
             
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search, download=not stream))
+        # 根據輸入內容動態決定是否使用 extract_flat
+        parse_options = {
+            'format': 'bestaudio[acodec=opus]/bestaudio/best',
+            'noplaylist': False,
+            'quiet': True,
+            'no_warnings': True,
+            'default_search': 'auto',
+            'source_address': '0.0.0.0',
+        }
+        
+        # [Bug Fix] 播放清單使用 extract_flat 快速取得目錄；單曲/搜尋則完整解析以取得標題
+        if 'list=' in search:
+            parse_options['extract_flat'] = 'in_playlist'
 
-        if not data:
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+                data = await loop.run_in_executor(
+                    executor, 
+                    _extract_info_in_process, 
+                    search, 
+                    not stream, 
+                    parse_options
+                )
+        except Exception as e:
+            print(f"[進程解析錯誤]: {e}")
+            return []
+
+        if not data or isinstance(data, dict) and '_error' in data:
+            if data and '_error' in data:
+                print(f"[解析錯誤]: {data['_error']}")
             return []
 
         if 'entries' in data:
-            # 取得所有條目 (如果是搜尋結果，則視為列表)
             entries = data['entries']
         else:
             entries = [data]
@@ -96,9 +137,23 @@ class YTDLSource(discord.AudioSource):
         """獲取直接串流地址 (真正可播放的網址)"""
         if not target_url:
             return None
-        # 使用不帶 extract_flat 的提取器
-        data = await loop.run_in_executor(None, lambda: ytdl_full.extract_info(target_url, download=False))
-        return data.get('url') if data else None
+        
+        # 【按需啟動進程】獲取直接網址時也是用完即關閉
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+                data = await loop.run_in_executor(
+                    executor, 
+                    _extract_info_in_process, 
+                    target_url, 
+                    False, 
+                    ytdl_full_options
+                )
+                if not data or (isinstance(data, dict) and '_error' in data):
+                    return None
+                return data.get('url')
+        except Exception as e:
+            print(f"[獲取直接 URL 錯誤]: {e}")
+            return None
 
 class MusicPlayer:
     def __init__(self, interaction: discord.Interaction):
@@ -107,9 +162,8 @@ class MusicPlayer:
         self.next = asyncio.Event()
         self.current = None
         self.voice_client = interaction.guild.voice_client
-        self.loop = interaction.client.loop
-        self.voice_client = interaction.guild.voice_client
-        self.loop = interaction.client.loop
+        self.loop = asyncio.get_event_loop()
+        self._destroying = False # 新增：防止重複執行 destroy
         self.player_task = self.loop.create_task(self.player_loop())
 
     async def player_loop(self):
@@ -178,22 +232,39 @@ class MusicPlayer:
             
             self.current = None
 
+        # [Bug Fix] 迴圈正常結束後（例如外部斷線），也要執行銷毀以清理字典中的 self
+        self.destroy()
+
     def destroy(self):
         """徹底清理播放器"""
+        if self._destroying:
+            return
+        self._destroying = True
         # 確保從緩存中移除
         cog = self.interaction.client.get_cog('Music')
         if cog and self.interaction.guild_id in cog.players:
             del cog.players[self.interaction.guild_id]
 
-        # 1. 先停止語音輸出，這會觸發 ffmpeg 進程的關閉
-        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
-            self.voice_client.stop()
+        # 1. 先從源頭清理音訊流與 FFmpeg 進程
+        try:
+            if self.voice_client and self.voice_client.source:
+                # 明確呼叫 YTDLSource 的 cleanup，進而關閉 FFmpeg
+                self.voice_client.source.cleanup()
+        except:
+            pass
 
-        # 2. 取消播放循環任務
+        # 2. 停止語音輸出
+        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+            try:
+                self.voice_client.stop()
+            except:
+                pass
+
+        # 3. 取消播放循環任務
         if self.player_task and not self.player_task.done():
             self.player_task.cancel()
         
-        # 3. 斷開語音連接
+        # 4. 斷開語音連接
         if self.voice_client and self.voice_client.is_connected():
             return self.loop.create_task(self.voice_client.disconnect())
 
@@ -226,6 +297,30 @@ class Music(commands.Cog):
         self.bot = bot
         self.players = {}
 
+    async def cog_unload(self):
+        """當 Cog 被卸載 (如機器人關閉) 時，清理所有播放器資源"""
+        print(f"[Music Cog] 正在清理 {len(self.players)} 個活躍播放器...")
+        
+        # 1. 先清理所有播放器（停止 FFmpeg、取消任務）
+        player_list = list(self.players.values())
+        for player in player_list:
+            try:
+                player.destroy()
+            except Exception as e:
+                print(f"[清理播放器失敗]: {e}")
+        self.players.clear()
+
+        # 2. [Bug Fix] 確保所有語音連線都被正確斷開
+        #    destroy() 使用 create_task 排程斷開，可能來不及執行
+        #    這裡直接 await 斷開所有殘留的語音連線
+        for vc in list(self.bot.voice_clients):
+            try:
+                await vc.disconnect(force=True)
+            except Exception as e:
+                print(f"[斷開語音連線失敗]: {e}")
+        
+        print("[Music Cog] 清理完畢。")
+
     async def connect_voice(self, interaction: discord.Interaction, allow_move: bool = False):
         """輔助方法：處理語音頻道連接與移動邏輯"""
         if not interaction.user.voice:
@@ -248,8 +343,16 @@ class Music(commands.Cog):
     # --- 邏輯處理方法 (Logic Methods) ---
 
     def get_player(self, interaction: discord.Interaction):
-        if interaction.guild_id in self.players:
-            return self.players[interaction.guild_id]
+        player = self.players.get(interaction.guild_id)
+        
+        # [Bug Fix] 若播放器已存在，需更新其語音客端參考，並檢查任務是否已死
+        if player:
+            player.voice_client = interaction.guild.voice_client
+            if not player.player_task.done():
+                return player
+            # 若任務已結束，則執行清理並重新建立
+            player.destroy()
+
         player = MusicPlayer(interaction)
         self.players[interaction.guild_id] = player
         return player
@@ -311,86 +414,65 @@ class Music(commands.Cog):
                 except:
                     pass
 
-            # 使用 connect_voice 來處理加入邏輯以獲得自定義的訊息控制
+            # 處理加入語音頻道
             success, join_message = await self.connect_voice(interaction, allow_move=True)
             if not success:
                 await self.safe_send_message(interaction, content=join_message, ephemeral=False)
                 return
 
-            is_new_join = bool(join_message)
-
-            # 在真正開始解析音樂前，顯示「正在搜尋音樂中」提示
+            # 顯示搜尋提示（統一流程）
             try:
-                if is_new_join:
-                    # 若為新加入頻道，先把原本思考泡泡換成「已加入頻道」，再另外送出一則搜尋訊息
-                    try:
-                        await interaction.edit_original_response(content=join_message)
-                    except:
-                        pass
-                    try:
-                        search_message = await interaction.followup.send(
-                            content=":mag_right: 正在搜尋音樂中...",
-                            ephemeral=False,
-                        )
-                    except:
-                        search_message = None
+                if join_message:
+                    # 新加入頻道：先顯示加入訊息，再另外發送搜尋提示
+                    await interaction.edit_original_response(content=join_message)
+                    search_message = await interaction.followup.send(
+                        content=":mag_right: 正在搜尋音樂中...", ephemeral=False
+                    )
                 else:
-                    # 已經在頻道中，直接把思考泡泡改成搜尋提示，稍後會以編輯方式顯示成功或失敗
-                    try:
-                        search_message = await interaction.edit_original_response(
-                            content=":mag_right: 正在搜尋音樂中..."
-                        )
-                    except:
-                        search_message = None
+                    # 已在頻道：直接把思考泡泡改成搜尋提示
+                    search_message = await interaction.edit_original_response(
+                        content=":mag_right: 正在搜尋音樂中..."
+                    )
             except:
-                # 顯示搜尋提示失敗時，不影響後續播放流程
                 search_message = None
 
             player = self.get_player(interaction)
             # 解析音樂網址 (此操作較耗時)
-            sources = list(await YTDLSource.from_url(song, loop=self.bot.loop, stream=True))
+            sources = list(await YTDLSource.from_url(song, loop=asyncio.get_event_loop(), stream=True))
+
+            # [Bug Fix] 過濾掉播放清單中的無效項目（被刪除或私人影片會是 None）
+            sources = [s for s in sources if s is not None]
 
             if not sources:
-                error_text = f":x: 抱歉，我翻遍了也找不到跟 **{song}** 相關的音樂耶..."
-                if search_message:
-                    await search_message.edit(content=error_text)
-                else:
-                    await self.safe_send_message(interaction, content=error_text, ephemeral=False)
+                await self._update_search_message(interaction, search_message,
+                    f":x: 抱歉，我翻遍了也找不到跟 **{song}** 相關的音樂耶...")
                 return
 
             for source_data in sources:
                 source_data['requester_mention'] = interaction.user.mention
                 await player.queue.put(source_data)
 
-            # 準備音樂加入隊列的訊息
+            # 準備結果訊息
             if len(sources) > 1:
                 queue_info = f":white_check_mark: `{interaction.user.display_name}` 一口氣點了 **{len(sources)}** 首音樂，已經通通塞進清單啦！"
             else:
                 queue_info = f":white_check_mark: `{interaction.user.display_name}` 點的 **{sources[0].get('title', '未知')}** 已經加入隊列排隊囉！"
 
-            if search_message:
-                # 成功解析後，以編輯方式替換原本的搜尋提示
-                await search_message.edit(content=queue_info)
-            else:
-                # 後備方案：維持舊有的訊息行為
-                if is_new_join:
-                    await interaction.followup.send(content=queue_info, ephemeral=False)
-                else:
-                    try:
-                        await interaction.edit_original_response(content=queue_info)
-                    except:
-                        await self.safe_send_message(interaction, content=queue_info, ephemeral=False)
-
+            await self._update_search_message(interaction, search_message, queue_info)
 
         except Exception as e:
             error_msg = ":x: 嗚嗚，這個平台因為版權保護不支援喔。" if "DRM" in str(e) else ":x: 糟糕，解析這首歌的資訊時出了點差錯，我可能沒辦法播放它喔！"
-            try:
-                if search_message:
-                    await search_message.edit(content=error_msg)
-                else:
-                    await self.safe_send_message(interaction, content=error_msg, ephemeral=False)
-            except:
-                await self.safe_send_message(interaction, content=error_msg, ephemeral=False)
+            await self._update_search_message(interaction, search_message, error_msg)
+
+    async def _update_search_message(self, interaction, search_message, content):
+        """統一處理搜尋訊息的更新"""
+        try:
+            if search_message:
+                await search_message.edit(content=content)
+            else:
+                await self.safe_send_message(interaction, content=content, ephemeral=False)
+        except:
+            await self.safe_send_message(interaction, content=content, ephemeral=False)
 
     async def skip_logic(self, interaction: discord.Interaction):
         try:
