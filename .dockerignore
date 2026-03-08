@@ -1,3 +1,8 @@
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
 # Python
 __pycache__/
 *.py[cod]
@@ -10,10 +15,12 @@ venv/
 # external tools
 external/
 
-# Github
-.github/
-
 # Logs and OS specific
 *.log
 .DS_Store
 Thumbs.db
+
+# git
+.git
+.gitignore
+.github
