@@ -4,7 +4,6 @@ FROM python:3-slim
 WORKDIR /app
 
 # 環境設定
-ENV TZ="Asia/Taipei"
 ENV FFMPEG_PATH="/usr/bin/ffmpeg"
 ENV DISCORD_BOT_TOKEN="your_discord_bot_token"
 
