@@ -31,11 +31,7 @@ class MusicBot(commands.Bot):
         await self.tree.sync()
         print(f"[系統] 已同步斜線指令至 Discord")
 
-        # 註冊持久化按鈕視圖
-        from cogs.music import NowPlayingView
-        music_cog = self.get_cog('Music')
-        if music_cog:
-            self.add_view(NowPlayingView(music_cog, guild_id=None))
+        # 註冊持久化按鈕視圖的操作已移至 cogs/music.py 的 __init__ 中處理
 
 
     async def on_ready(self):
