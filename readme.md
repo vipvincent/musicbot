@@ -43,15 +43,12 @@
         - `Use Voice Activity(使用語音活動)`
 4. 設定完成後，您可以在 **Installation(安裝)** 中的 **Install Link(安裝連結)** 將機器人加入伺服器。
 
-### 2. 設定 `config.toml`
-將專案根目錄下的 `config_template.toml` 複製一份並重新命名為 `config.toml`，然後填入您的 Token：
+### 2. 設定 `.env`
+將專案根目錄下的 `.env.example` 複製一份並重新命名為 `.env`，然後填入您的 Token 和FFMPEG路徑：
 
-```toml
-[bot]
-token = "您的_DISCORD_BOT_TOKEN_HERE"
-
-[paths]
-ffmpeg = "ffmpeg/ffmpeg.exe"
+```env
+DISCORD_BOT_TOKEN="您的_DISCORD_BOT_TOKEN_HERE"
+FFMPEG_PATH="ffmpeg/ffmpeg.exe"
 ```
 
 ---
@@ -89,7 +86,8 @@ dc musicbot/
 │   └── music.py      # 音樂核心邏輯
 ├── ffmpeg/
 │   └── ffmpeg.exe    # (請手動放入)
-├── config.toml       # 唯一設定檔
+├── .env              # 環境設定檔（請複製自 .env.example）
+├── .env.example      # .env 範本
 ├── main.py           # 啟動檔案
 ├── requirements.txt  # 依賴清單
 └── .gitignore        # Git 忽略設定

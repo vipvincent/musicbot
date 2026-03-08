@@ -7,9 +7,6 @@ env/
 venv/
 .venv/
 
-# Config
-config.toml
-
 # ffmpeg
 ffmpeg/
 

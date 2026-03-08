@@ -1,13 +1,12 @@
 import discord
 from discord.ext import commands
 import os
-import tomllib
+from dotenv import load_dotenv
 
-# 讀取 config.toml
-with open("config.toml", "rb") as f:
-    config = tomllib.load(f)
+# 載入 .env 檔案
+load_dotenv()
 
-TOKEN = config["token"]["dcbot"]
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 class MusicBot(commands.Bot):
     def __init__(self):
@@ -25,6 +24,12 @@ class MusicBot(commands.Bot):
         # 同步斜線指令 (Slash Commands)
         await self.tree.sync()
         print(f"已同步斜線指令至 Discord")
+
+        # 註冊持久化按鈕視圖
+        from cogs.music import NowPlayingView
+        music_cog = self.get_cog('Music')
+        if music_cog:
+            self.add_view(NowPlayingView(music_cog, guild_id=None))
 
     async def on_ready(self):
         print(f"機器人已上線：{self.user} (ID: {self.user.id})")

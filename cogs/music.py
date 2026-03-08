@@ -2,29 +2,25 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
-import tomllib
+from dotenv import load_dotenv
 import os
 import yt_dlp
-import time
 
-# 讀取 config.toml
-with open("config.toml", "rb") as f:
-    config = tomllib.load(f)
+# 載入 .env 檔案
+load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FFMPEG_PATH = config["paths"]["ffmpeg"]
+FFMPEG_PATH = os.getenv("FFMPEG_PATH")
 # 如果不是絕對路徑且包含目錄分隔符，則與 BASE_DIR 合併
 if not os.path.isabs(FFMPEG_PATH) and ('/' in FFMPEG_PATH or '\\' in FFMPEG_PATH):
     FFMPEG_PATH = os.path.join(BASE_DIR, FFMPEG_PATH)
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
+    'before_options': '-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -thread_queue_size 4096',
     'options': '-vn -loglevel panic',
     'executable': FFMPEG_PATH
 }
 
-# 距離歌曲結束多少秒時開始預解析下一首
-PREFETCH_BEFORE_END = 30
 
 # YTDL 提取器設定
 ytdl_format_options = {
@@ -67,15 +63,25 @@ class YTDLSource(discord.AudioSource):
         # 若內部來源已經是 Opus，讓 VoiceClient 直接傳送而不重新編碼
         return getattr(self.source, "is_opus", lambda: False)()
 
+    def cleanup(self):
+        # 當 VoiceClient 停止播放時，確保同時關閉深層的 FFmpeg 進程
+        try:
+            self.source.cleanup()
+        except Exception as e:
+            print(f"[YTDLSource 清理錯誤]: {e}")
+
     @classmethod
     async def from_url(cls, search: str, *, loop=None, stream=True):
-        loop = loop or asyncio.get_event_loop()
+        loop = loop or asyncio.get_running_loop()
         
         # 決定搜尋方式
         if not search.startswith(('http://', 'https://')):
             search = f"ytsearch1:{search}"
             
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search, download=not stream))
+
+        if not data:
+            return []
 
         if 'entries' in data:
             # 取得所有條目 (如果是搜尋結果，則視為列表)
@@ -88,9 +94,11 @@ class YTDLSource(discord.AudioSource):
     @staticmethod
     async def get_direct_url(target_url, loop):
         """獲取直接串流地址 (真正可播放的網址)"""
+        if not target_url:
+            return None
         # 使用不帶 extract_flat 的提取器
         data = await loop.run_in_executor(None, lambda: ytdl_full.extract_info(target_url, download=False))
-        return data.get('url')
+        return data.get('url') if data else None
 
 class MusicPlayer:
     def __init__(self, interaction: discord.Interaction):
@@ -100,77 +108,9 @@ class MusicPlayer:
         self.current = None
         self.voice_client = interaction.guild.voice_client
         self.loop = interaction.client.loop
+        self.voice_client = interaction.guild.voice_client
+        self.loop = interaction.client.loop
         self.player_task = self.loop.create_task(self.player_loop())
-        # 用於背景預解析下一首的任務
-        self.prefetch_task: asyncio.Task | None = None
-        # 用於估算目前已播放時間（偵測接近結束）
-        self.current_start_time: float | None = None
-        self.current_duration: float | None = None
-
-    async def _prefetch_watcher(self):
-        """持續偵測目前這首是否接近結束，接近時才預解析下一首"""
-        try:
-            while True:
-                # 若目前沒有正在播放的歌或已經沒有下一首，就結束 watcher
-                if not self.current or not self.voice_client or not self.voice_client.is_connected():
-                    break
-
-                # 如果隊列為空，暫時不需要預解析，稍後再看情況
-                if self.queue.empty():
-                    await asyncio.sleep(1.0)
-                    continue
-
-                # 若無法取得長度，直接立刻預解析一次就離開（以免頻繁重試）
-                if self.current_duration is None or self.current_duration <= 0 or self.current_start_time is None:
-                    await self.prefetch_next()
-                    break
-
-                elapsed = time.time() - self.current_start_time
-                remaining = self.current_duration - elapsed
-
-                # 一旦推估「剩餘時間 <= 門檻」，就進行預解析並結束 watcher
-                if remaining <= PREFETCH_BEFORE_END:
-                    await self.prefetch_next()
-                    break
-
-                await asyncio.sleep(1.0)
-        except asyncio.CancelledError:
-            # 正常取消，不需要印錯
-            return
-        except Exception as e:
-            print("[預解析下一首時發生錯誤]", e)
-
-    def schedule_prefetch(self):
-        """啟動或重啟預解析偵測任務"""
-        if self.prefetch_task and not self.prefetch_task.done():
-            self.prefetch_task.cancel()
-        self.prefetch_task = self.loop.create_task(self._prefetch_watcher())
-
-    async def prefetch_next(self):
-        """實際執行下一首的預解析邏輯"""
-        if self.queue.empty():
-            return
-
-        # 僅預處理「下一首」而不是整個清單，避免白做工
-        try:
-            next_source_data = self.queue._queue[0]
-        except (AttributeError, IndexError):
-            return
-
-        # 依照主播放邏輯取得適合播放的 URL，但不啟動 ffmpeg，只取串流網址
-        url = next_source_data.get('url')
-        if not url or any(x in url for x in ['youtube.com', 'youtu.be', 'googlevideo.com']) or not str(url).startswith('http'):
-            target = next_source_data.get('webpage_url') or next_source_data.get('url')
-            if target and not str(target).startswith('http'):
-                target = f"https://www.youtube.com/watch?v={target}"
-            if target:
-                url = await YTDLSource.get_direct_url(target, self.loop)
-
-        if not url:
-            return
-
-        # 記錄預解析結果，供稍後真正播放時使用
-        next_source_data['prefetched_url'] = url
 
     async def player_loop(self):
         await self.interaction.client.wait_until_ready()
@@ -197,35 +137,24 @@ class MusicPlayer:
                 if not self.voice_client or not self.voice_client.is_connected():
                     break
 
-                # 獲取播放資訊中的網址：若已經有預解析結果就先用，否則即時取得
-                url = source_data.get('prefetched_url')
-                if not url:
-                    url = source_data.get('url')
-                    # 如果網址無效、或是來自 YouTube (通常需要新鮮的串流網址)
-                    if not url or any(x in url for x in ['youtube.com', 'youtu.be', 'googlevideo.com']) or not str(url).startswith('http'):
-                        target = source_data.get('webpage_url') or source_data.get('url')
-                        # 如果 target 看起來只是 ID，重建完整網址以提升識別率
-                        if target and not str(target).startswith('http'):
-                            target = f"https://www.youtube.com/watch?v={target}"
-                        
-                        # 獲取新鮮的 stream URL
+                # 獲取播放資訊中的網址
+                url = source_data.get('url')
+                # 如果網址無效、或是來自 YouTube (通常需要新鮮的串流網址)
+                if not url or any(x in url for x in ['youtube.com', 'youtu.be', 'googlevideo.com']) or not str(url).startswith('http'):
+                    target = source_data.get('webpage_url') or source_data.get('url')
+                    # 如果 target 看起來只是 ID，重建完整網址以提升識別率
+                    if target and not str(target).startswith('http'):
+                        target = f"https://www.youtube.com/watch?v={target}"
+                    
+                    # 獲取新鮮的 stream URL
+                    if target:
                         url = await YTDLSource.get_direct_url(target, self.loop)
-
-                    # 即時取得成功的話，也同步寫回預解析欄位，方便下一次重播或檢查
-                    if url:
-                        source_data['prefetched_url'] = url
+                    else:
+                        url = None
 
                 if not url:
                     await self.interaction.channel.send(f":x: 哎呀，我拿不到 **{source_data.get('title', '未知')}** 的播放資訊耶，這首可能要先跳過囉！")
                     continue
-
-                # 更新目前歌曲的開始時間與長度資訊，後續預解析會用到
-                duration = source_data.get('duration')
-                try:
-                    self.current_duration = float(duration) if duration is not None else None
-                except (TypeError, ValueError):
-                    self.current_duration = None
-                self.current_start_time = time.time()
 
                 # 使用 FFmpeg 直接產生 Opus 音訊，避免 Discord 端再次轉碼
                 # 這裡指定 method='fallback'，避免使用「native」探測模式導致 ffmpeg 失敗時噴錯
@@ -242,9 +171,6 @@ class MusicPlayer:
                 except Exception as msg_e:
                     print(f"[正在播放訊息發送失敗 (不影響播放)]: {msg_e}")
 
-                # 啟動背景預解析下一首（若有）
-                self.schedule_prefetch()
-
                 await self.next.wait()
             except Exception as e:
                 print("[播放時發生錯誤]", e)
@@ -259,10 +185,6 @@ class MusicPlayer:
         if cog and self.interaction.guild_id in cog.players:
             del cog.players[self.interaction.guild_id]
 
-        # 停止任何預解析任務，避免離開語音後仍在背景跑 yt_dlp
-        if self.prefetch_task and not self.prefetch_task.done():
-            self.prefetch_task.cancel()
-
         # 1. 先停止語音輸出，這會觸發 ffmpeg 進程的關閉
         if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
             self.voice_client.stop()
@@ -274,6 +196,29 @@ class MusicPlayer:
         # 3. 斷開語音連接
         if self.voice_client and self.voice_client.is_connected():
             return self.loop.create_task(self.voice_client.disconnect())
+
+class NowPlayingView(discord.ui.View):
+    def __init__(self, music_cog, guild_id):
+        super().__init__(timeout=None)
+        self.music_cog = music_cog
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="下一首", emoji="⏭️", style=discord.ButtonStyle.primary, custom_id="music_skip")
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.music_cog.skip_logic(interaction)
+
+    @discord.ui.button(label="播放清單", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="music_queue")
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.music_cog.queue_logic(interaction)
+
+    @discord.ui.button(label="清空", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="music_clear")
+    async def clear_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.music_cog.clear_logic(interaction)
+
+    @discord.ui.button(label="離開", emoji="🚪", style=discord.ButtonStyle.danger, custom_id="music_leave")
+    async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.music_cog.stop_logic(interaction, message=f":wave: `{interaction.user.display_name}` 按下了離開，我先退下囉！")
+
 
 class Music(commands.Cog):
 
@@ -402,55 +347,41 @@ class Music(commands.Cog):
                 search_message = None
 
             player = self.get_player(interaction)
-            # 記錄加入前隊列是否為空，用來決定是否需要啟動預解析
-            was_empty = player.queue.empty()
+            # 解析音樂網址 (此操作較耗時)
+            sources = list(await YTDLSource.from_url(song, loop=self.bot.loop, stream=True))
 
-            try:
-                # 解析音樂網址 (此操作較耗時)
-                sources = list(await YTDLSource.from_url(song, loop=self.bot.loop, stream=True))
-
-                if not sources:
-                    error_text = f":x: 抱歉，我翻遍了也找不到跟 **{song}** 相關的音樂耶..."
-                    if search_message:
-                        await search_message.edit(content=error_text)
-                    else:
-                        await self.safe_send_message(interaction, content=error_text, ephemeral=False)
-                    return
-
-                for source_data in sources:
-                    source_data['requester_mention'] = interaction.user.mention
-                    await player.queue.put(source_data)
-
-                # 若原本隊列是空的，而且現在有正在播放的歌曲，代表這批是「當前之後第一批歌」，
-                # 這種情況觸發預解析可以有效減少 A 播完後到 B 開播之間的空檔。
-                if was_empty and player.voice_client and player.voice_client.is_playing():
-                    player.schedule_prefetch()
-
-                # 準備音樂加入隊列的訊息
-                if len(sources) > 1:
-                    queue_info = f":white_check_mark: `{interaction.user.display_name}` 一口氣點了 **{len(sources)}** 首音樂，已經通通塞進清單啦！"
-                else:
-                    queue_info = f":white_check_mark: `{interaction.user.display_name}` 點的 **{sources[0].get('title', '未知')}** 已經加入隊列排隊囉！"
-
+            if not sources:
+                error_text = f":x: 抱歉，我翻遍了也找不到跟 **{song}** 相關的音樂耶..."
                 if search_message:
-                    # 成功解析後，以編輯方式替換原本的搜尋提示
-                    await search_message.edit(content=queue_info)
+                    await search_message.edit(content=error_text)
                 else:
-                    # 後備方案：維持舊有的訊息行為
-                    if is_new_join:
-                        await interaction.followup.send(content=queue_info, ephemeral=False)
-                    else:
-                        try:
-                            await interaction.edit_original_response(content=queue_info)
-                        except:
-                            await self.safe_send_message(interaction, content=queue_info, ephemeral=False)
+                    await self.safe_send_message(interaction, content=error_text, ephemeral=False)
+                return
 
-            except Exception as e:
-                error_msg = ":x: 嗚嗚，這個平台因為版權保護不支援喔。" if "DRM" in str(e) else ":x: 哎呀，這首歌的連結好像有點問題，我讀不到它的資訊耶！要不要換個連結試試看？"
-                if search_message:
-                    await search_message.edit(content=error_msg)
+            for source_data in sources:
+                source_data['requester_mention'] = interaction.user.mention
+                await player.queue.put(source_data)
+
+            # 準備音樂加入隊列的訊息
+            if len(sources) > 1:
+                queue_info = f":white_check_mark: `{interaction.user.display_name}` 一口氣點了 **{len(sources)}** 首音樂，已經通通塞進清單啦！"
+            else:
+                queue_info = f":white_check_mark: `{interaction.user.display_name}` 點的 **{sources[0].get('title', '未知')}** 已經加入隊列排隊囉！"
+
+            if search_message:
+                # 成功解析後，以編輯方式替換原本的搜尋提示
+                await search_message.edit(content=queue_info)
+            else:
+                # 後備方案：維持舊有的訊息行為
+                if is_new_join:
+                    await interaction.followup.send(content=queue_info, ephemeral=False)
                 else:
-                    await self.safe_send_message(interaction, content=error_msg, ephemeral=False)
+                    try:
+                        await interaction.edit_original_response(content=queue_info)
+                    except:
+                        await self.safe_send_message(interaction, content=queue_info, ephemeral=False)
+
+
         except Exception as e:
             error_msg = ":x: 嗚嗚，這個平台因為版權保護不支援喔。" if "DRM" in str(e) else ":x: 糟糕，解析這首歌的資訊時出了點差錯，我可能沒辦法播放它喔！"
             try:
@@ -543,29 +474,6 @@ class Music(commands.Cog):
                 embed.set_thumbnail(url=thumbnail)
             embed.add_field(name=" ", value=f"{requester} | {voice_channel}", inline=False)
 
-            # 定義動態按鈕 View (移至此處以共用)
-            class NowPlayingView(discord.ui.View):
-                def __init__(self, music_cog, guild_id):
-                    super().__init__(timeout=None)
-                    self.music_cog = music_cog
-                    self.guild_id = guild_id
-
-                @discord.ui.button(label="下一首", emoji="⏭️", style=discord.ButtonStyle.primary, custom_id="music_skip")
-                async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    await self.music_cog.skip_logic(interaction)
-
-                @discord.ui.button(label="播放清單", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="music_queue")
-                async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    await self.music_cog.queue_logic(interaction)
-
-                @discord.ui.button(label="清空", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="music_clear")
-                async def clear_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    await self.music_cog.clear_logic(interaction)
-
-                @discord.ui.button(label="離開", emoji="🚪", style=discord.ButtonStyle.danger, custom_id="music_leave")
-                async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    await self.music_cog.stop_logic(interaction, message=f":wave: `{interaction.user.display_name}` 按下了離開，我先退下囉！")
-
             view = NowPlayingView(self, interaction.guild_id)
             
             # 當 silent=True 時（player_loop 調用），發送訊息但不觸發通知
@@ -598,7 +506,7 @@ class Music(commands.Cog):
             # 定義分頁 View (已加入 Emoji 和清空按鈕)
             class QueueView(discord.ui.View):
                 def __init__(self, queue_data, page, max_page, music_cog):
-                    super().__init__(timeout=None)
+                    super().__init__(timeout=180)
                     self.queue_data = queue_data
                     self.current_page = page
                     self.max_page = max_page

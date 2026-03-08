@@ -1,7 +1,0 @@
-[token]
-# Discord 機器人 Token
-dcbot = "YOUR_DISCORD_BOT_TOKEN"
-
-[paths]
-# ffmpeg 執行檔路徑
-ffmpeg = "ffmpeg/ffmpeg.exe"
