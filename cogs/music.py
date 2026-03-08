@@ -243,8 +243,13 @@ class MusicPlayer:
                     continue
 
                 # 使用 FFmpeg 直接產生 Opus 音訊，避免 Discord 端再次轉碼
-                # 這裡指定 method='fallback'，避免使用「native」探測模式導致 ffmpeg 失敗時噴錯
-                source = await discord.FFmpegOpusAudio.from_probe(url, method='fallback', **FFMPEG_OPTIONS)
+                # 這裡指定自訂的 probe 函數，以解決 discord.py 的預設探測方法把原始 bitrate 放大導致超出 libopus 上限 (512k) 的問題
+                def custom_probe(src, exe):
+                    codec, br = discord.FFmpegOpusAudio._probe_codec_fallback(src, exe)
+                    # _probe_codec_fallback 會錯誤地套用 max(br, 512)，因此我們這裡用 min 強制其不高於 512
+                    return codec, min(br, 512) if br else 384
+
+                source = await discord.FFmpegOpusAudio.from_probe(url, method=custom_probe, **FFMPEG_OPTIONS)
                 self.current = YTDLSource(source, data=source_data)
 
                 # [Bug Fix] 明確綁定當前的 Event 到 lambda 中，防止競爭條件導致「連跳兩首」
