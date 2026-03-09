@@ -17,8 +17,8 @@ if FFMPEG_PATH and not os.path.isabs(FFMPEG_PATH) and ('/' in FFMPEG_PATH or '\\
     FFMPEG_PATH = os.path.join(BASE_DIR, FFMPEG_PATH)
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
-    'options': '-vn',
+    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn -loglevel panic -ac 2 -ar 48000 -probesize 32k -analyzeduration 0',
     'executable': FFMPEG_PATH or 'ffmpeg'
 }
 
