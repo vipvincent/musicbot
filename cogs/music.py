@@ -18,7 +18,7 @@ if FFMPEG_PATH and not os.path.isabs(FFMPEG_PATH) and ('/' in FFMPEG_PATH or '\\
 
 FFMPEG_OPTIONS = {
     'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -loglevel panic -ac 2 -ar 48000 -probesize 32k -analyzeduration 0',
+    'options': '-vn',
     'executable': FFMPEG_PATH or 'ffmpeg'
 }
 
