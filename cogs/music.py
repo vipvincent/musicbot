@@ -201,7 +201,11 @@ class MusicPlayer:
             try:
                 # 播放前檢查是否還連接在語音頻道
                 if not self.voice_client or not self.voice_client.is_connected():
-                    break
+                    # 嘗試重新獲取一次 voice_client (可能在 get_player 時更新了)
+                    self.voice_client = self.interaction.guild.voice_client
+                    if not self.voice_client or not self.voice_client.is_connected():
+                        print("[player_loop] 播放前偵測到未連線，終止循環。")
+                        break
 
                 # 獲取播放資訊中的網址
                 url = source_data.get('url')
@@ -229,18 +233,19 @@ class MusicPlayer:
                 source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
                 self.current = YTDLSource(source, data=source_data)
 
-                # [Bug Fix] 明確綁定當前的 Event 到 lambda 中，防止競爭條件導致「連跳兩首」
-                current_event = self.next
-                self.voice_client.play(self.current, after=lambda _, e=current_event: self.loop.call_soon_threadsafe(e.set))
-                                
-                # [Bug Fix] 使用 try-except 包裹訊息發送，防止發送失敗導致 current_task 被取消而跳過音樂
+                # [Optimization] 1. 先發送「正在播放」訊息，作為視覺預告
                 try:
                     music_cog = self.interaction.client.get_cog('Music')
                     if music_cog:
+                        # 呼叫邏輯發送訊息，silent=True 避免重複通知
                         await music_cog.nowplaying_logic(self.interaction, source_data=source_data, current=self.current, incoming_player=self, silent=True)
                 except Exception as msg_e:
-                    print(f"[正在播放訊息發送失敗 (不影響播放)]: {msg_e}")
+                    print(f"[正在播放訊息預發送失敗 (不影響播放)]: {msg_e}")
 
+                # [Optimization] 2. 直接啟動播放，不進行任何人為延遲
+                current_event = self.next
+                self.voice_client.play(self.current, after=lambda _, e=current_event: self.loop.call_soon_threadsafe(e.set))
+                                
                 # [Bug Fix] 每 5 秒檢查一次播放狀態的循環保護
                 while True:
                     try:
@@ -329,7 +334,16 @@ class Music(commands.Cog):
         
         channel = interaction.user.voice.channel
         if not interaction.guild.voice_client:
-            await channel.connect()
+            voice_client = await channel.connect(timeout=20.0, reconnect=True)
+            
+            # 確保連線狀態已轉為 True (通常 connect 會等待完成，但這層檢查是為了保險)
+            if not voice_client.is_connected():
+                try:
+                    async with asyncio.timeout(3.0):
+                        while not voice_client.is_connected():
+                            await asyncio.sleep(0.1)
+                except: pass
+
             return True, f":sound: `{interaction.user.display_name}` 呼叫我啦！已抵達保護區：**{channel.name}**"
         
         if interaction.guild.voice_client.channel == channel:
