@@ -12,7 +12,6 @@ WORKDIR /app
 
 # 環境設定
 ENV FFMPEG_PATH="/usr/bin/ffmpeg"
-ENV DISCORD_BOT_TOKEN=""
 
 # 安裝 ffmpeg 和必要的系統依賴
 RUN apt-get update && \
