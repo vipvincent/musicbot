@@ -299,7 +299,7 @@ class NowPlayingView(discord.ui.View):
     async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.skip_logic(interaction)
 
-    @discord.ui.button(label="播放清單", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="music_queue")
+    @discord.ui.button(label="待播清單", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="music_queue")
     async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.music_cog.queue_logic(interaction)
 
@@ -497,13 +497,13 @@ class Music(commands.Cog):
         try:
             player = self.players.get(interaction.guild_id)
             if not player or player.queue.empty():
-                return await interaction.response.send_message(content=":x: 播放清單本來就是空的啦！")
+                return await interaction.response.send_message(content=":x: 待播清單本來就是空的啦！")
             while not player.queue.empty():
                 try:
                     player.queue.get_nowait()
                 except: break
             
-            msg = f":white_check_mark: 痛快！`{interaction.user.display_name}` 把播放清單通通清空了！"
+            msg = f":white_check_mark: 痛快！`{interaction.user.display_name}` 把待播清單通通清空了！"
             await interaction.response.send_message(content=msg)
         except Exception as e:
             print("[clear_logic 錯誤]", e)
@@ -568,7 +568,7 @@ class Music(commands.Cog):
         try:
             player = self.players.get(interaction.guild_id)
             if not player or player.queue.empty():
-                msg = ":x: 播放清單目前空空如也喔。"
+                msg = ":x: 待播清單目前空空如也喔。"
                 if not interaction.response.is_done():
                     return await interaction.response.send_message(content=msg)
                 return await interaction.followup.send(content=msg)
@@ -617,13 +617,13 @@ class Music(commands.Cog):
                     start = (self.current_page - 1) * per_page
                     end = start + per_page
                     fmt = "\n".join([f"{i+1}. {item.get('title', '未知')}" for i, item in enumerate(self.queue_data[start:end], start=start)])
-                    embed = discord.Embed(title=f"待播放清單 (第 {self.current_page}/{self.max_page} 頁，共 {len(self.queue_data)} 首)", description=fmt, color=discord.Color.green())
+                    embed = discord.Embed(title=f"待播清單 (第 {self.current_page}/{self.max_page} 頁，共 {len(self.queue_data)} 首)", description=fmt, color=discord.Color.green())
                     await interaction.edit_original_response(embed=embed, view=self)
 
             start = (page - 1) * per_page
             end = start + per_page
             fmt = "\n".join([f"{i+1}. {item.get('title', '未知')}" for i, item in enumerate(upcoming[start:end], start=start)])
-            embed = discord.Embed(title=f":scroll: 待播放清單 (第 {page}/{max_page} 頁，共 {total} 首)", description=fmt, color=discord.Color.green())
+            embed = discord.Embed(title=f":scroll: 待播清單 (第 {page}/{max_page} 頁，共 {total} 首)", description=fmt, color=discord.Color.green())
             
             view = QueueView(upcoming, page, max_page, self)
             if not interaction.response.is_done():
@@ -641,7 +641,7 @@ class Music(commands.Cog):
     async def join(self, interaction: discord.Interaction):
         await self.join_logic(interaction)
 
-    @app_commands.command(name="play", description="播放 YouTube 音樂 (支援網址、關鍵字、播放清單)")
+    @app_commands.command(name="play", description="播放音樂 (支援網址、關鍵字、播放清單)")
     @app_commands.describe(song="請輸入網址、關鍵字或播放清單")
     async def play(self, interaction: discord.Interaction, song: str):
         await self.play_logic(interaction, song)
@@ -662,17 +662,17 @@ class Music(commands.Cog):
     async def leave(self, interaction: discord.Interaction):
         await self.stop_logic(interaction)
 
-    @app_commands.command(name="queue", description="查看當前待播放清單")
+    @app_commands.command(name="queue", description="查看當前待待播清單")
     @app_commands.describe(page="要查看的頁數")
     async def queue_info(self, interaction: discord.Interaction, page: int = 1):
         await self.queue_logic(interaction, page)
 
-    @app_commands.command(name="playlist", description="查看當前待播放清單")
+    @app_commands.command(name="playlist", description="查看當前待待播清單")
     @app_commands.describe(page="要查看的頁數")
     async def playlist(self, interaction: discord.Interaction, page: int = 1):
         await self.queue_logic(interaction, page)
 
-    @app_commands.command(name="clear", description="清空播放清單")
+    @app_commands.command(name="clear", description="清空待播清單")
     async def clear(self, interaction: discord.Interaction):
         await self.clear_logic(interaction)
 
