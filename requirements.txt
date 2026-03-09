@@ -1,5 +1,5 @@
 discord.py
 PyNaCl
 davey
-yt-dlp
+yt-dlp[default]
 python-dotenv

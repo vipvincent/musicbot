@@ -1,4 +1,11 @@
+# 官方 Deno 鏡像作為來源
+FROM denoland/deno:bin AS deno-bin
+
+# Python 鏡像
 FROM python:3-slim
+
+# 從 Deno 鏡像中複製執行檔到系統路徑
+COPY --from=deno-bin /deno /usr/local/bin/deno
 
 # 設定工作目錄
 WORKDIR /app

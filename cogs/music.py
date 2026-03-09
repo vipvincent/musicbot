@@ -30,6 +30,7 @@ BASE_YTDL_OPTIONS = {
     'no_warnings': True,
     'source_address': '0.0.0.0',
     'default_search': 'auto',
+    'js_runtimes': ['deno', 'node']
 }
 
 # 用於初步獲取資訊的選項 (預設支援播放清單快速獲取)
