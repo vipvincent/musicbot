@@ -10,11 +10,7 @@ import concurrent.futures
 # 載入 .env 檔案
 load_dotenv()
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FFMPEG_PATH = os.getenv("FFMPEG_PATH")
-# 如果不是絕對路徑且包含目錄分隔符，則與 BASE_DIR 合併
-if FFMPEG_PATH and not os.path.isabs(FFMPEG_PATH) and ('/' in FFMPEG_PATH or '\\' in FFMPEG_PATH):
-    FFMPEG_PATH = os.path.join(BASE_DIR, FFMPEG_PATH)
 
 FFMPEG_OPTIONS = {
     'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
@@ -22,8 +18,6 @@ FFMPEG_OPTIONS = {
     'executable': FFMPEG_PATH or 'ffmpeg'
 }
 
-
-# 核心 YTDL 共用設定
 BASE_YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'quiet': True,
@@ -33,18 +27,12 @@ BASE_YTDL_OPTIONS = {
     'js_runtimes': {'deno': {}, 'node': {}},
 }
 
-# 用於初步獲取資訊的選項 (預設支援播放清單快速獲取)
+# YTDL 選項管理
 ytdl_format_options = BASE_YTDL_OPTIONS.copy()
-ytdl_format_options.update({
-    'noplaylist': False,
-    'extract_flat': 'in_playlist',
-})
+ytdl_format_options.update({'noplaylist': False, 'extract_flat': 'in_playlist'})
 
-# 用於獲取真正直接流網址的提取器 (不使用 flat 模式)
 ytdl_full_options = BASE_YTDL_OPTIONS.copy()
-ytdl_full_options.update({
-    'noplaylist': True,
-})
+ytdl_full_options.update({'noplaylist': True})
 
 def _extract_info_in_process(query, download=False, options=None):
     """
@@ -91,24 +79,14 @@ class YTDLSource(discord.AudioSource):
             parse_options['extract_flat'] = 'in_playlist'
 
         try:
-            # 使用傳入的持久化 executor，如果沒有則按需建立 (後備方案)
-            if executor:
-                data = await loop.run_in_executor(
-                    executor, 
-                    _extract_info_in_process, 
-                    search, 
-                    not stream, 
-                    parse_options
-                )
-            else:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as new_executor:
-                    data = await loop.run_in_executor(
-                        new_executor, 
-                        _extract_info_in_process, 
-                        search, 
-                        not stream, 
-                        parse_options
-                    )
+            # 使用傳入的持久化 executor，若無則使用預設執行緒池
+            data = await loop.run_in_executor(
+                executor, 
+                _extract_info_in_process, 
+                search, 
+                not stream, 
+                parse_options
+            )
         except Exception as e:
             print(f"[進程解析錯誤]: {e}")
             return []
@@ -134,23 +112,13 @@ class YTDLSource(discord.AudioSource):
             return None
         
         try:
-            if executor:
-                data = await loop.run_in_executor(
-                    executor, 
-                    _extract_info_in_process, 
-                    target_url, 
-                    False, 
-                    ytdl_full_options
-                )
-            else:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as new_executor:
-                    data = await loop.run_in_executor(
-                        new_executor, 
-                        _extract_info_in_process, 
-                        target_url, 
-                        False, 
-                        ytdl_full_options
-                    )
+            data = await loop.run_in_executor(
+                executor, 
+                _extract_info_in_process, 
+                target_url, 
+                False, 
+                ytdl_full_options
+            )
             # [Bug Fix] 這個判斷與回傳必須放在 if/else 外面，否則有 executor 時會回傳 None
             if not data:
                 print(f"[獲取直接 URL 失敗]: 拿不到任何資料 (target: {target_url})")
@@ -216,14 +184,10 @@ class MusicPlayer:
                     if target and not str(target).startswith('http'):
                         target = f"https://www.youtube.com/watch?v={target}"
                     
-                    # 獲取新鮮的 stream URL (加入重試機制抵抗偶發的 YouTube 限制)
+                    # 獲取新鮮的 stream URL
                     url = None
                     if target:
-                        for _ in range(2):
-                            url = await YTDLSource.get_direct_url(target, self.loop, self.executor)
-                            if url:
-                                break
-                            await asyncio.sleep(1.5)
+                        url = await YTDLSource.get_direct_url(target, self.loop, self.executor)
 
                 if not url:
                     await self.interaction.channel.send(f":x: 哎呀，我拿不到 **{source_data.get('title', '未知')}** 的播放資訊耶，這首可能要先跳過囉！")
@@ -244,7 +208,10 @@ class MusicPlayer:
 
                 # [Optimization] 2. 直接啟動播放，不進行任何人為延遲
                 current_event = self.next
-                self.voice_client.play(self.current, after=lambda _, e=current_event: self.loop.call_soon_threadsafe(e.set))
+                def after_playing(error):
+                    self.loop.call_soon_threadsafe(current_event.set)
+
+                self.voice_client.play(self.current, after=after_playing)
                                 
                 # [Bug Fix] 每 5 秒檢查一次播放狀態的循環保護
                 while True:
@@ -360,12 +327,11 @@ class Music(commands.Cog):
     def get_player(self, interaction: discord.Interaction):
         player = self.players.get(interaction.guild_id)
         
-        # [Bug Fix] 若播放器已存在，需更新其語音客端參考，並檢查任務是否已死
+        # 若播放器已存在，更新語音客戶端參考
         if player:
             player.voice_client = interaction.guild.voice_client
             if not player.player_task.done():
                 return player
-            # 若任務已結束，則執行清理並重新建立
             player.destroy()
 
         player = MusicPlayer(interaction, self.executor)

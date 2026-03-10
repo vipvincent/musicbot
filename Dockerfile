@@ -11,7 +11,7 @@ COPY --from=deno-bin /deno /usr/local/bin/deno
 WORKDIR /app
 
 # 環境設定
-ENV FFMPEG_PATH="/usr/bin/ffmpeg"
+ENV PYTHONUNBUFFERED=1
 
 # 安裝 ffmpeg 和必要的系統依賴
 RUN apt-get update && \

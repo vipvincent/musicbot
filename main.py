@@ -9,8 +9,18 @@ load_dotenv()
 
 # 手動初始化日誌系統 (因為改用了 asyncio.run，系統不會預設開啟)
 discord.utils.setup_logging(level=logging.INFO, root=False)
-# [Bug Fix] 忽略 discord.player 的 INFO 層級日誌，避免 FFmpeg 正常退出的 -22 代碼 (4294967274) 洗版
-logging.getLogger('discord.player').setLevel(logging.WARNING)
+# [系統] FFmpeg 錯誤代碼監控工具
+class FFmpegFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        # 僅隱藏 code 0 (正常切歌) 的訊息，保留其他所有錯誤退出碼
+        if "terminated with code 0" in msg:
+            return False
+        return True
+
+discord_player_log = logging.getLogger('discord.player')
+discord_player_log.setLevel(logging.INFO)
+discord_player_log.addFilter(FFmpegFilter())
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -31,11 +41,10 @@ class MusicBot(commands.Bot):
         await self.tree.sync()
         print(f"[系統] 已同步斜線指令至 Discord")
 
-        # 註冊持久化按鈕視圖的操作已移至 cogs/music.py 的 __init__ 中處理
-
 
     async def on_ready(self):
         print(f"[系統] 機器人已上線：{self.user} (ID: {self.user.id})")
+        print("---------------")
 
 if __name__ == "__main__":
     bot = MusicBot()
