@@ -1,0 +1,14 @@
+# node
+node_modules
+dist
+build
+coverage
+logs
+package-lock.json
+yarn.lock
+
+# .env log os
+.env
+*.log
+.DS_Store
+Thumbs.db

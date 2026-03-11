@@ -1,0 +1,126 @@
+server: # REST 和 WS 伺服器
+  port: 2333
+  address: 0.0.0.0
+  http2:
+    enabled: false # 是否啟用 HTTP/2 支援
+plugins:
+#  name: # 插件名稱
+#    some_key: some_value # 插件的一些鍵值設定
+#    another_key: another_value
+  youtube:
+    enabled: true # 是否可以使用此資源。
+    allowSearch: true # 是否可以使用「ytsearch:」和「ytmsearch:」。
+    allowDirectVideoIds: true # 只有完整的 URL 才能匹配。如果為 false，則只有完整的 URL 才能載入。
+    allowDirectPlaylistIds: true # 只有完整的 URL 才能匹配。如果為 false，則只有完整的 URL 才能載入。
+    # 用於曲目載入的用戶端。請參閱下方的有效客戶端清單。
+    # 客戶端將按給定順序查詢（即首先查詢第一個客戶端，依此類推…）
+    clients:
+      - MUSIC
+      - ANDROID_VR
+      - WEB
+      - WEBEMBEDDED 
+    remoteCipher:
+      url: "https://cipher.kikkia.dev/" # 遠端密鑰伺服器的基本 URL。
+      password: "your_secret_password" # 用於向遠端密鑰伺服器進行身份驗證的密碼。
+      userAgent: "your_service_name" # 可選的 user-agent 標頭，用於後端指標。
+lavalink:
+  plugins:
+#    - dependency: "com.github.example:example-plugin:1.0.0" # 必填，插件的座標
+#      repository: "https://maven.example.com/releases" # 可選，預設使用 Lavalink 的 releases repository
+#      snapshot: false # 可選，預設為 false，用於告訴 Lavalink 使用 snapshot repository 而不是 release repository
+#  pluginsDir: "./plugins" # 可選，預設為 "./plugins"
+#  defaultPluginRepository: "https://maven.lavalink.dev/releases" # 可選，預設為 Lavalink release repository
+#  defaultPluginSnapshotRepository: "https://maven.lavalink.dev/snapshots" # 可選，預設為 Lavalink snapshot repository
+  server:
+    password: "youshallnotpass"
+    sources:
+      # 預設的 Youtube source 已被棄用且不再更新。請改用 https://github.com/lavalink-devs/youtube-source#plugin 插件
+      youtube: false
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      nico: true
+      http: true # 警告：若啟用 HTTP 且未設定代理，可能會暴露你的伺服器 IP 位址
+      local: false
+    filters: # 所有濾鏡預設都啟用
+      volume: true
+      equalizer: true
+      karaoke: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+      distortion: true
+      rotation: true
+      channelMix: true
+      lowPass: true
+    nonAllocatingFrameBuffer: false # 設為 true 可減少每個播放器的記憶體配置，但會以重新建構音訊 frame 為代價（例如音量變更不會即時）
+    bufferDurationMs: 400 # NAS buffer 的持續時間。數值越高越能抵抗較長的 GC 暫停。<=0 可關閉 JDA-NAS。最小 40ms，太低可能造成停頓
+    frameBufferDurationMs: 5000 # 要緩衝多少毫秒的音訊
+    opusEncodingQuality: 10 # Opus 編碼品質。範圍 0–10，10 為最高品質但最耗 CPU
+    resamplingQuality: LOW # 重新取樣品質。可為 LOW、MEDIUM、HIGH，HIGH 最耗 CPU
+    trackStuckThresholdMs: 10000 # 判定音軌卡住的時間門檻。若在此時間內未回傳任何音訊資料即視為卡住
+    useSeekGhosting: true # Seek ghosting：在 seek 過程中會持續播放 buffer 中的音訊直到耗盡或 seek 完成
+    youtubePlaylistLoadLimit: 6 # YouTube 播放清單載入頁數（每頁 100 首）
+    playerUpdateInterval: 5 # 向客戶端傳送播放器更新的頻率（秒）
+    youtubeSearchEnabled: true
+    soundcloudSearchEnabled: true
+    soundcloudFilterOutPreviewTracks: false
+    gc-warnings: true
+    #ratelimit:
+      #ipBlocks: ["1.0.0.0/8", "..."] # IP 區塊列表
+      #excludedIps: ["...", "..."] # 明確排除不被 Lavalink 使用的 IP
+      #strategy: "RotateOnBan" # RotateOnBan | LoadBalance | NanoSwitch | RotatingNanoSwitch
+      #searchTriggersFail: true # 搜尋時若收到 429 是否標記該 IP 為失敗
+      #retryLimit: -1 # -1 = 使用 lavaplayer 預設值 | 0 = 無限重試 | >0 = 重試次數
+    #youtubeConfig: # 用於避免 YouTube 年齡限制（部分受限影片仍可播放）
+      #email: "" # Google 帳號 Email
+      #password: "" # Google 帳號密碼
+    #httpConfig: # 用於防止惡意者透過 IP 抓取攻擊你的音樂節點，這樣只會攻擊到 HTTP 代理
+      #proxyHost: "localhost" # 代理主機名稱（IP 或網域）
+      #proxyPort: 3128 # 代理連接埠，3128 為 squidProxy 預設值
+      #proxyUser: "" # 可選，基本驗證帳號
+      #proxyPassword: "" # 基本驗證密碼
+    timeouts:
+      connectTimeoutMs: 3000
+      connectionRequestTimeoutMs: 3000
+      socketTimeoutMs: 3000
+
+metrics:
+  prometheus:
+    enabled: false
+    endpoint: /metrics
+
+sentry:
+  dsn: ""
+  environment: ""
+#  tags:
+#    some_key: some_value
+#    another_key: another_value
+
+spring:
+  cloud:
+    config:
+      enabled: false
+
+logging:
+  file:
+    path: ./logs/
+
+  level:
+    root: INFO
+    lavalink: INFO
+
+  request:
+    enabled: true
+    includeClientInfo: true
+    includeHeaders: false
+    includeQueryString: true
+    includePayload: true
+    maxPayloadLength: 10000
+    beforeRequest: false
+
+  logback:
+    rollingpolicy:
+      max-file-size: 1GB
+      max-history: 30
