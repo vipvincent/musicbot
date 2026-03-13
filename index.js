@@ -426,8 +426,7 @@ async function playNext(guildId) {
     console.error('[playNext] 播放曲目時發生錯誤', e);
     await editOrSendError(state, ':x: 嗚嗚，我拿不到這首歌的播放資訊耶，暫時沒辦法唱給你聽喔！');
     state.current = null;
-    state._skipEnd = true;   // 避免 end 事件重複呼叫 playNext
-    return playNext(guildId);
+    return playNext(guildId);  // 直接繼續，不經過 end 事件
   }
 
   if (!state.player._listenersAttached) {
@@ -444,7 +443,6 @@ function bindPlayerEvents(player, guildId) {
   player.on('end', async (data) => {
     const s = getLatestState();
     if (!s || data.reason === 'replaced' || s.stopping) return;
-    if (s._skipEnd) { s._skipEnd = false; return; }
     await playNext(guildId);
   });
 
@@ -454,8 +452,7 @@ function bindPlayerEvents(player, guildId) {
     const title = s.current?.info?.title || '未知';
     await editOrSendError(s, `:x: 哎呀，我拿不到 **${title}** 的播放資訊耶，這首可能要先跳過囉！`);
     s.current = null;
-    s._skipEnd = true;   // end 事件緊接著觸發，略過它
-    await playNext(guildId);
+    // end 事件緊接著會觸發，由它驅動下一首
   });
 
   player.on('stuck', async () => {
@@ -463,8 +460,7 @@ function bindPlayerEvents(player, guildId) {
     if (!s || s.stopping) return;
     await editOrSendError(s, ':x: 嗚嗚，這首歌卡住了，幫你跳到下一首！');
     s.current = null;
-    s._skipEnd = true;   // end 事件緊接著觸發，略過它
-    await playNext(guildId);
+    // end 事件緊接著會觸發，由它驅動下一首
   });
 
   player.on('closed', async () => {
