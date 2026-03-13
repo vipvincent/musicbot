@@ -41,18 +41,16 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates]
 });
 
-const RECONNECT_INTERVAL_MS = 5000;   // 每次重連間隔（毫秒）
-const RECONNECT_MAX_TRIES  = 0;       // 0 = 無限次重試
-let reconnectAttempt = 0;
-let reconnectTimer   = null;
-let isReconnecting   = false;
-
+// Shoukaku 內建重連：reconnectTries 次失敗後才算真正斷線
+// reconnectInterval 單位為「秒」
 const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes, {
   resume: true,
   resumeTimeout: 30,
-  reconnectTries: 0,          // 交由自訂重連邏輯處理
-  reconnectInterval: 5000
+  reconnectTries: 999,        // 實際上無限重連
+  reconnectInterval: 5        // 每 5 秒重試一次
 });
+
+let isReconnecting = false;
 
 const guildStates = new Map();
 const pendingPlayChoices = new Map();
@@ -127,49 +125,6 @@ async function resumeAllGuilds() {
   }
 }
 
-/** 啟動自動重連排程 */
-function scheduleReconnect() {
-  if (reconnectTimer) return;   // 已在排程中
-  if (RECONNECT_MAX_TRIES > 0 && reconnectAttempt >= RECONNECT_MAX_TRIES) {
-    console.error(`❌ Lavalink 重連已超過最大次數 (${RECONNECT_MAX_TRIES})，放棄重連。`);
-    return;
-  }
-
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null;
-    reconnectAttempt++;
-    console.log(`🔄 正在嘗試重連 Lavalink（第 ${reconnectAttempt} 次）...`);
-
-    try {
-      const node = shoukaku.nodes.get('default');
-
-      // 若節點已連線則不需重連
-      if (node && node.state === NODE_STATE_CONNECTED) {
-        console.log('✅ Lavalink 節點已恢復連線，取消重連排程。');
-        isReconnecting = false;
-        reconnectAttempt = 0;
-        return;
-      }
-
-      // 移除舊節點（若存在），再重新加入讓 Shoukaku 建立全新 WebSocket
-      // 直接呼叫 node.connect() 會因內部 ws 為 null 而丟出錯誤
-      try {
-        if (node) await shoukaku.removeNode('default');
-      } catch (_) {}
-
-      shoukaku.addNode({
-        name: 'default',
-        url: `${lavalinkHost}:${lavalinkPort}`,
-        auth: lavalinkPassword,
-        secure: lavalinkSecure
-      });
-      // 連線結果由 shoukaku.on('ready') 或 shoukaku.on('close') 接手
-    } catch (e) {
-      console.error('[reconnect] 重連時發生錯誤：', e?.message || e);
-      scheduleReconnect();   // 繼續重試
-    }
-  }, RECONNECT_INTERVAL_MS);
-}
 
 const commandData = [
   new SlashCommandBuilder().setName('join').setDescription('讓機器人加入您目前的語音頻道'),
@@ -954,7 +909,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 shoukaku.on('error', (name, error) => {
-  console.error(`❌ Lavalink 節點 [${name}] 發生錯誤：`, error?.message || error);
+  // 忽略重連期間的 WebSocket 連線錯誤，避免洗版 log
+  const msg = error?.message || String(error);
+  if (isReconnecting && msg.includes('once')) return;
+  console.error(`❌ Lavalink 節點 [${name}] 發生錯誤：`, msg);
 });
 
 shoukaku.on('ready', async (name) => {
@@ -963,40 +921,41 @@ shoukaku.on('ready', async (name) => {
 
   if (isReconnecting) {
     isReconnecting = false;
-    reconnectAttempt = 0;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
     console.log('🔄 Lavalink 重連成功，正在恢復各頻道播放...');
     await resumeAllGuilds();
   }
 });
 
-shoukaku.on('close', async (name, code, reason) => {
-  console.warn(`⚠️  Lavalink 節點 [${name}] 已斷線（code=${code}，reason=${reason || '無'}）`);
-  lavalinkReady = [...shoukaku.nodes.values()].some((n) => n.state === NODE_STATE_CONNECTED);
+// Shoukaku 每次重試失敗會發出 'reconnecting'，全部失敗才發出 'disconnect'
+// 我們設定 reconnectTries: 999，所以 'disconnect' 幾乎不會觸發
+shoukaku.on('reconnecting', (name, tries, interval) => {
+  lavalinkReady = false;
+  console.warn(`🔄 Lavalink 節點 [${name}] 重連中，剩餘嘗試次數：${tries}，下次重試：${interval}s`);
 
-  if (!lavalinkReady && !isReconnecting) {
+  if (!isReconnecting) {
     isReconnecting = true;
-    reconnectAttempt = 0;
-    await pauseAllGuilds('⚠️ Lavalink 節點已斷線，正在嘗試自動重連，請稍候...');
-    console.log(`🔄 Lavalink 斷線，${RECONNECT_INTERVAL_MS / 1000} 秒後開始重連...`);
-    scheduleReconnect();
+    pauseAllGuilds('⚠️ Lavalink 節點已斷線，正在自動重連，請稍候...').catch(() => {});
   }
 });
 
 shoukaku.on('disconnect', async (name, players, moved) => {
   if (moved) return;
-  console.warn(`⚠️  Lavalink 節點 [${name}] 斷開連線（players=${players?.length ?? 0}）`);
-  lavalinkReady = [...shoukaku.nodes.values()].some((n) => n.state === NODE_STATE_CONNECTED);
-
-  if (!lavalinkReady && !isReconnecting) {
-    isReconnecting = true;
-    reconnectAttempt = 0;
-    await pauseAllGuilds('⚠️ Lavalink 節點已斷線，正在嘗試自動重連，請稍候...');
-    scheduleReconnect();
+  lavalinkReady = false;
+  console.error(`❌ Lavalink 節點 [${name}] 完全斷線（已耗盡重試次數）`);
+  // 所有重試都失敗時通知使用者
+  for (const [, state] of guildStates) {
+    try {
+      if (state.textChannelId && state.guild) {
+        const ch = state.guild.channels.cache.get(state.textChannelId);
+        if (ch) await ch.send('❌ Lavalink 無法重新連線，請聯絡管理員。').catch(() => {});
+      }
+    } catch (_) {}
   }
+});
+
+shoukaku.on('close', (name, code, reason) => {
+  lavalinkReady = [...shoukaku.nodes.values()].some((n) => n.state === NODE_STATE_CONNECTED);
+  console.warn(`⚠️  Lavalink 節點 [${name}] WebSocket 關閉（code=${code}）`);
 });
 
 client.login(token);
