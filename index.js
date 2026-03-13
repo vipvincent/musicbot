@@ -92,14 +92,10 @@ let lavalinkEverReady = false;  // 是否曾經成功連線過
 const NODE_STATE_CONNECTED = 1;
 
 /** 將所有 guild 播放狀態暫停並通知文字頻道 */
-async function pauseAllGuilds(reason) {
+async function pauseAllGuilds() {
   for (const [guildId, state] of guildStates.entries()) {
     try {
       clearIdle(state);
-      if (state.textChannelId && state.guild) {
-        const ch = state.guild.channels.cache.get(state.textChannelId);
-        if (ch) await ch.send(reason).catch(() => {});
-      }
       // 標記為需要重連後繼續播放
       state._pendingResume = !!(state.current);
       state.stopping = true;          // 停止觸發 end 事件的自動播下一首
@@ -148,11 +144,6 @@ async function resumeAllGuilds() {
       }
 
       await playNext(guildId);
-
-      if (state.textChannelId && state.guild) {
-        const ch = state.guild.channels.cache.get(state.textChannelId);
-        if (ch) await ch.send('✅ Lavalink 已重新連線，繼續播放音樂！').catch(() => {});
-      }
     } catch (e) {
       console.error(`[resumeAllGuilds] 恢復 ${guildId} 時發生錯誤`, e);
     }
@@ -963,7 +954,7 @@ shoukaku.on('reconnecting', (name) => {
   if (!isReconnecting && lavalinkEverReady) {
     isReconnecting = true;
     console.warn(`🔄 Lavalink 節點 [${name}] 斷線，自動重連中...`);
-    pauseAllGuilds('⚠️ Lavalink 節點已斷線，正在自動重連，請稍候...').catch(() => {});
+    pauseAllGuilds().catch(() => {});
   }
 });
 
