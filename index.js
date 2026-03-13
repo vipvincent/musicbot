@@ -41,20 +41,54 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates]
 });
 
-// Shoukaku 內建重連：reconnectTries 次失敗後才算真正斷線
+// reconnectTries: Infinity = 永不放棄重連（斷線後）
 // reconnectInterval 單位為「秒」
 const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes, {
   resume: true,
   resumeTimeout: 30,
-  reconnectTries: 999,        // 實際上無限重連
-  reconnectInterval: 5        // 每 5 秒重試一次
+  reconnectTries: 1,         // 最少需要 1 次才會觸發 disconnect
+  reconnectInterval: 0       // 等待 0 秒，立即失敗交由我們的 handler
 });
 
+// patch addNode：每次加入節點後監聽 node 的 disconnect，實現無限重連
+function attachNodeDisconnectHandler(nodeName) {
+  const node = shoukaku.nodes.get(nodeName);
+  if (!node) return;
+  node.once('disconnect', () => {   // once：每個節點只觸發一次
+    lavalinkReady = false;
+    if (!isWaitingReconnect) {
+      isWaitingReconnect = true;
+      console.warn(`⚠️  Lavalink 連線失敗，5 秒後重試...`);
+    }
+    setTimeout(() => {
+      isWaitingReconnect = false;
+      if (lavalinkReady) return;
+      shoukaku.addNode({
+        name: nodeName,
+        url: `${lavalinkHost}:${lavalinkPort}`,
+        auth: lavalinkPassword,
+        secure: lavalinkSecure
+      });
+    }, 5000);
+  });
+}
+
+const _origAddNode = shoukaku.addNode.bind(shoukaku);
+shoukaku.addNode = function(options) {
+  _origAddNode(options);
+  setImmediate(() => attachNodeDisconnectHandler(options.name));
+};
+
+// 對初始節點（建構子已加入）補掛監聽
+setImmediate(() => attachNodeDisconnectHandler('default'));
+
 let isReconnecting = false;
+let isWaitingReconnect = false;  // 已排程重連，避免重複印 log
 
 const guildStates = new Map();
 const pendingPlayChoices = new Map();
 let lavalinkReady = false;
+let lavalinkEverReady = false;  // 是否曾經成功連線過
 const NODE_STATE_CONNECTED = 1;
 
 /** 將所有 guild 播放狀態暫停並通知文字頻道 */
@@ -175,7 +209,8 @@ function getState(guildId) {
       textChannelId: null,
       idleTimer: null,
       guild: null,
-      stopping: false
+      stopping: false,
+      nowPlayingMsg: null
     });
   }
   return guildStates.get(guildId);
@@ -384,19 +419,14 @@ async function playNext(guildId) {
   try {
     const encoded = item?.encoded || item?.track?.encoded || item?.track?.track;
     if (!encoded) throw new Error('Missing encoded track');
+    state.nowPlayingMsg = null;
     await state.player.playTrack({ track: { encoded } });
     await sendNowPlaying(state, state.guild, true);
   } catch (e) {
     console.error('[playNext] 播放曲目時發生錯誤', e);
-    try {
-      if (state.textChannelId && state.guild) {
-        const channel = state.guild.channels.cache.get(state.textChannelId);
-        if (channel) {
-          await channel.send(':x: 嗚嗚，我拿不到這首歌的播放資訊耶，暫時沒辦法唱給你聽喔！');
-        }
-      }
-    } catch (_) {}
+    await editOrSendError(state, ':x: 嗚嗚，我拿不到這首歌的播放資訊耶，暫時沒辦法唱給你聽喔！');
     state.current = null;
+    state._skipEnd = true;   // 避免 end 事件重複呼叫 playNext
     return playNext(guildId);
   }
 
@@ -414,35 +444,26 @@ function bindPlayerEvents(player, guildId) {
   player.on('end', async (data) => {
     const s = getLatestState();
     if (!s || data.reason === 'replaced' || s.stopping) return;
+    if (s._skipEnd) { s._skipEnd = false; return; }
     await playNext(guildId);
   });
 
   player.on('exception', async () => {
     const s = getLatestState();
     if (!s || s.stopping) return;
-    try {
-      if (s.textChannelId && s.guild) {
-        const channel = s.guild.channels.cache.get(s.textChannelId);
-        if (channel) {
-          const title = s.current?.info?.title || '未知';
-          await channel.send(`:x: 哎呀，我拿不到 **${title}** 的播放資訊耶，這首可能要先跳過囉！`);
-        }
-      }
-    } catch (_) {}
+    const title = s.current?.info?.title || '未知';
+    await editOrSendError(s, `:x: 哎呀，我拿不到 **${title}** 的播放資訊耶，這首可能要先跳過囉！`);
+    s.current = null;
+    s._skipEnd = true;   // end 事件緊接著觸發，略過它
     await playNext(guildId);
   });
 
   player.on('stuck', async () => {
     const s = getLatestState();
     if (!s || s.stopping) return;
-    try {
-      if (s.textChannelId && s.guild) {
-        const channel = s.guild.channels.cache.get(s.textChannelId);
-        if (channel) {
-          await channel.send(':x: 嗚嗚，我拿不到這首歌的播放資訊耶，暫時沒辦法唱給你聽喔！');
-        }
-      }
-    } catch (_) {}
+    await editOrSendError(s, ':x: 嗚嗚，這首歌卡住了，幫你跳到下一首！');
+    s.current = null;
+    s._skipEnd = true;   // end 事件緊接著觸發，略過它
     await playNext(guildId);
   });
 
@@ -546,7 +567,20 @@ async function sendNowPlaying(state, guild, silent) {
   if (!embed) return;
   const payload = { embeds: [embed], components: [buildControls()] };
   if (silent) payload.flags = MessageFlags.SuppressNotifications;
-  await channel.send(payload);
+  const msg = await channel.send(payload);
+  state.nowPlayingMsg = msg;
+}
+
+async function editOrSendError(state, msg) {
+  try {
+    if (state.nowPlayingMsg) {
+      await state.nowPlayingMsg.edit({ content: msg, embeds: [], components: [] });
+      state.nowPlayingMsg = null;
+    } else if (state.textChannelId && state.guild) {
+      const channel = state.guild.channels.cache.get(state.textChannelId);
+      if (channel) await channel.send(msg);
+    }
+  } catch (_) {}
 }
 
 async function handlePlay(interaction) {
@@ -909,14 +943,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 shoukaku.on('error', (name, error) => {
-  // 忽略重連期間的 WebSocket 連線錯誤，避免洗版 log
-  const msg = error?.message || String(error);
-  if (isReconnecting && msg.includes('once')) return;
-  console.error(`❌ Lavalink 節點 [${name}] 發生錯誤：`, msg);
+  // 重連/等待重試期間靜默，訊息由 disconnect handler 統一處理
+  if (!lavalinkReady || isReconnecting || isWaitingReconnect) return;
+  console.error(`❌ Lavalink 節點 [${name}] 發生錯誤：`, error?.message || error);
 });
 
 shoukaku.on('ready', async (name) => {
   lavalinkReady = true;
+  lavalinkEverReady = true;
+  isWaitingReconnect = false;
   console.log(`✅ Lavalink 節點已就緒：${name}`);
 
   if (isReconnecting) {
@@ -926,36 +961,19 @@ shoukaku.on('ready', async (name) => {
   }
 });
 
-// Shoukaku 每次重試失敗會發出 'reconnecting'，全部失敗才發出 'disconnect'
-// 我們設定 reconnectTries: 999，所以 'disconnect' 幾乎不會觸發
-shoukaku.on('reconnecting', (name, tries, interval) => {
+shoukaku.on('reconnecting', (name) => {
   lavalinkReady = false;
-  console.warn(`🔄 Lavalink 節點 [${name}] 重連中，剩餘嘗試次數：${tries}，下次重試：${interval}s`);
-
-  if (!isReconnecting) {
+  // 啟動時從未就緒過，不算「斷線」，靜默即可
+  if (!isReconnecting && lavalinkEverReady) {
     isReconnecting = true;
+    console.warn(`🔄 Lavalink 節點 [${name}] 斷線，自動重連中...`);
     pauseAllGuilds('⚠️ Lavalink 節點已斷線，正在自動重連，請稍候...').catch(() => {});
   }
 });
 
-shoukaku.on('disconnect', async (name, players, moved) => {
-  if (moved) return;
-  lavalinkReady = false;
-  console.error(`❌ Lavalink 節點 [${name}] 完全斷線（已耗盡重試次數）`);
-  // 所有重試都失敗時通知使用者
-  for (const [, state] of guildStates) {
-    try {
-      if (state.textChannelId && state.guild) {
-        const ch = state.guild.channels.cache.get(state.textChannelId);
-        if (ch) await ch.send('❌ Lavalink 無法重新連線，請聯絡管理員。').catch(() => {});
-      }
-    } catch (_) {}
-  }
-});
 
-shoukaku.on('close', (name, code, reason) => {
+shoukaku.on('close', (name) => {
   lavalinkReady = [...shoukaku.nodes.values()].some((n) => n.state === NODE_STATE_CONNECTED);
-  console.warn(`⚠️  Lavalink 節點 [${name}] WebSocket 關閉（code=${code}）`);
 });
 
 client.login(token);
