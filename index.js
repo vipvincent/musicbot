@@ -142,20 +142,28 @@ function scheduleReconnect() {
 
     try {
       const node = shoukaku.nodes.get('default');
-      if (!node) {
-        console.error('[reconnect] 找不到 default 節點，重新排程...');
-        scheduleReconnect();
-        return;
-      }
+
       // 若節點已連線則不需重連
-      if (node.state === NODE_STATE_CONNECTED) {
+      if (node && node.state === NODE_STATE_CONNECTED) {
         console.log('✅ Lavalink 節點已恢復連線，取消重連排程。');
         isReconnecting = false;
         reconnectAttempt = 0;
         return;
       }
-      // 強制 Shoukaku 重新連線該節點
-      await node.connect();
+
+      // 移除舊節點（若存在），再重新加入讓 Shoukaku 建立全新 WebSocket
+      // 直接呼叫 node.connect() 會因內部 ws 為 null 而丟出錯誤
+      try {
+        if (node) await shoukaku.removeNode('default');
+      } catch (_) {}
+
+      shoukaku.addNode({
+        name: 'default',
+        url: `${lavalinkHost}:${lavalinkPort}`,
+        auth: lavalinkPassword,
+        secure: lavalinkSecure
+      });
+      // 連線結果由 shoukaku.on('ready') 或 shoukaku.on('close') 接手
     } catch (e) {
       console.error('[reconnect] 重連時發生錯誤：', e?.message || e);
       scheduleReconnect();   // 繼續重試
