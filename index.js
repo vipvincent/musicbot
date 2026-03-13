@@ -262,8 +262,8 @@ async function ensureVoice(interaction) {
     if (!existingChannelId || existingChannelId === voice.channelId) {
       return { ok: true, message: null };
     }
-    const name = interaction.guild.channels.cache.get(existingChannelId)?.name || '未知';
-    return { ok: false, message: `:x: 不好意思，我已經在 **${name}** 當 DJ 囉！` };
+    const channelMention = `<#${existingChannelId}>`;
+    return { ok: false, message: `:x: 不好意思，我已經在 ${channelMention} 當 DJ 囉！` };
   }
 
   if (hasConnection) {
