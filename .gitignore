@@ -1,14 +1,16 @@
 # node
 node_modules
-dist
-build
-coverage
-logs
 package-lock.json
-yarn.lock
 
-# .env log os
+# .env
 .env
-*.log
+
+# OS
 .DS_Store
 Thumbs.db
+
+# development use
+*.log
+logs/
+plugins/
+*.jar

@@ -15,14 +15,120 @@ plugins:
     # 用於曲目載入的用戶端。請參閱下方的有效客戶端清單。
     # 客戶端將按給定順序查詢（即首先查詢第一個客戶端，依此類推…）
     clients:
+      - WEB
       - MUSIC
       - ANDROID_VR
-      - WEB
       - WEBEMBEDDED 
     remoteCipher:
       url: "https://cipher.kikkia.dev/" # 遠端密鑰伺服器的基本 URL。
       password: "your_secret_password" # 用於向遠端密鑰伺服器進行身份驗證的密碼。
       userAgent: "your_service_name" # 可選的 user-agent 標頭，用於後端指標。
+  lavasrc:
+    providers: # 用於載入曲目的自訂提供者。這是預設設定
+      # - "dzisrc:%ISRC%" # Deezer ISRC 提供者
+      # - "dzsearch:%QUERY%" # Deezer 搜尋提供者
+      - "ytsearch:\"%ISRC%\"" # 若曲目沒有 ISRC 將會被忽略。參見 https://en.wikipedia.org/wiki/International_Standard_Recording_Code
+      - "ytsearch:%QUERY%" # 若曲目沒有 ISRC 或無法透過 ISRC 找到曲目時將會使用
+      #  你可以在這裡加入多個其他備用來源
+    sources:
+      spotify: false # 啟用 Spotify 來源
+      applemusic: false # 啟用 Apple Music 來源
+      deezer: false # 啟用 Deezer 來源
+      yandexmusic: false # 啟用 Yandex Music 來源
+      flowerytts: false # 啟用 Flowery TTS 來源
+      youtube: true # 啟用 YouTube 搜尋來源 (https://github.com/topi314/LavaSearch)
+      vkmusic: false # 啟用 Vk Music 來源
+      tidal: false # 啟用 Tidal 來源
+      qobuz : false # 啟用 Qobuz 來源
+      ytdlp: false # 啟用 yt-dlp 來源
+      jiosaavn: false # 啟用 JioSaavn 來源
+    lyrics-sources:
+      spotify: false # 啟用 Spotify 歌詞來源
+      deezer: false # 啟用 Deezer 歌詞來源
+      youtube: false # 啟用 YouTube 歌詞來源
+      yandexmusic: false # 啟用 Yandex Music 歌詞來源
+      vkmusic: false # 啟用 Vk Music 歌詞來源
+      lrcLib: false # 啟用 LRC Library 歌詞來源 (https://lrclib.net)
+    spotify:
+      # clientId 與 clientSecret 是使用 spsearch 時所必須的
+#      clientId: "your client id"
+#      clientSecret: "your client secret"
+      # spDc: "your sp dc cookie" # 用於存取 Spotify 歌詞 API 的 sp dc cookie
+      countryCode: "US" # 用於篩選藝人熱門歌曲的國家代碼。參見 https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
+      playlistLoadLimit: 6 # 每頁 100 首歌曲時要載入的頁數
+      albumLoadLimit: 6 # 每頁 50 首歌曲時要載入的頁數
+      resolveArtistsInSearch: true # 是否在曲目搜尋結果中解析藝人（可能會變慢）
+      localFiles: false # 啟用 Spotify 播放清單中的本地檔案支援。注意 `uri` 與 `isrc` 會是 `null`，`identifier` 會是 `"local"`
+      preferAnonymousToken: false # 是否使用匿名 token 來解析曲目、藝人與專輯。Spotify 產生的播放清單始終使用匿名 token 解析，因為否則無法運作。此功能需要設定 customTokenEndpoint。
+      customTokenEndpoint: "http://localhost:8080/api/token" # 用於取得匿名 token 的自訂端點（可選）。若未設定，將使用 Spotify 預設端點，但可能無法運作。回應必須符合 Spotify 匿名 token 的回應格式。
+    applemusic:
+      countryCode: "US" # 用於篩選藝人熱門歌曲與語言的國家代碼。參見 https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
+      mediaAPIToken: "your apple music api token" # Apple Music API token
+      # 或指定一個 Apple Music 金鑰
+      keyID: "your key id"
+      teamID: "your team id"
+      musicKitKey: |
+        -----BEGIN PRIVATE KEY-----
+        your key
+        -----END PRIVATE KEY-----      
+      playlistLoadLimit: 6 # 每頁 300 首歌曲時要載入的頁數
+      albumLoadLimit: 6 # 每頁 300 首歌曲時要載入的頁數
+    deezer:
+      masterDecryptionKey: "your master decryption key" # 用於解密 Deezer 曲目的主金鑰。（是的，這裡沒有提供，你需要自行取得）
+      arl: "your deezer arl" # 用於存取 Deezer API 的 arl cookie，現在已不再是可選項
+      formats: [ "FLAC", "MP3_320", "MP3_256", "MP3_128", "MP3_64", "AAC_64" ] # 想要使用的 Deezer 音訊格式。"FLAC"、"MP3_320"、"MP3_256" 與 "AAC_64" 只有 Premium 用戶可用，且需要有效的 arl
+    yandexmusic:
+      accessToken: "your access token" # 用於存取 Yandex Music API 的 token。參見 https://github.com/topi314/LavaSrc#yandex-music
+      playlistLoadLimit: 1 # 每頁 100 首歌曲時要載入的頁數
+      albumLoadLimit: 1 # 每頁 50 首歌曲時要載入的頁數
+      artistLoadLimit: 1 # 每頁 10 首歌曲時要載入的頁數
+#      proxy: # 若定義，YandexMusic 的 HTTP 請求將透過此代理伺服器。YandexMusic 有區域封鎖
+#        url: "https://example.org" # 要使用的 HTTP 代理
+#        username: "my-bot" # 用於代理驗證的使用者名稱（可選）
+#        password: "youshallpass" # 用於代理驗證的密碼（可選）     
+    flowerytts:
+      voice: "default voice" # （區分大小寫）可在此取得預設語音 https://api.flowery.pw/v1/tts/voices
+      translate: false # 是否將文字翻譯成該語音的母語
+      silence: 0 # silence 參數單位為毫秒。範圍 0 到 10000。預設為 0。
+      speed: 1.0 # speed 參數為 0.5 到 10 的浮點數。預設為 1.0。（0.5 為半速，2.0 為兩倍速等）
+      audioFormat: "mp3" # 支援格式：mp3、ogg_opus、ogg_vorbis、aac、wav、flac。預設格式為 mp3
+    youtube:
+      countryCode: "US" # 用於搜尋與歌詞的國家代碼。參見 https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
+      language: "en" # 用於搜尋與歌詞的語言代碼。參見 https://en.wikipedia.org/wiki/List_of_ISO_639_language_codes
+    vkmusic:
+      userToken: "your user token" # 此 token 用於 API 授權。教學：https://github.com/topi314/LavaSrc#vk-music
+      playlistLoadLimit: 1 # 每頁 50 首歌曲時要載入的頁數
+      artistLoadLimit: 1 # 每頁 10 首歌曲時要載入的頁數
+      recommendationsLoadLimit: 10 # 曲目數量
+#      proxy: # 如果插件所在的伺服器位於俄羅斯以外，必須設定位於俄羅斯的代理以繞過區域限制
+#        url: "https://example.org" # 要使用的 HTTP 代理
+#        username: "my-bot" # 用於代理驗證的使用者名稱（可選）
+#        password: "youshallpass" # 用於代理驗證的密碼（可選）
+    tidal:
+      countryCode: "US" # 用於存取 Tidal 區域內容的國家代碼 (ISO 3166-1 alpha-2)。
+      searchLimit: 6 # 要返回多少個搜尋結果
+      token: "your tidal token" # 用於存取 Tidal API 的 token。參見 https://github.com/topi314/LavaSrc#tidal
+    qobuz:
+      userOauthToken : "your user oauth token" # 此 token 用於 API 授權。教學：https://github.com/topi314/LavaSrc#qobuz
+      #      appId : optional (只有在使用舊版 userOauthToken 時才需要提供)
+      #      appSecret : optional (只有在使用舊版 userOauthToken 時才需要提供)
+    ytdlp:
+      path: "yt-dlp" # yt-dlp 可執行檔的路徑
+      searchLimit: 10 # 要返回多少個搜尋結果
+      mixPlaylistLoadLimit: 25 # 混合播放清單每個載入的曲目數量。預設為 25
+      playlistLoadLimit: 1000 # 一般播放清單每個載入的曲目數量。預設為 1000
+      customLoadArgs: ["-q", "--no-warnings", "--flat-playlist", "--skip-download", "-J"] # 傳遞給 yt-dlp 的自訂載入參數
+      customPlaybackArgs: ["-q", "--no-warnings", "-f", "bestaudio", "-J"] # yt-dlp 的自訂播放參數
+    jiosaavn:
+      decryption: # JioSaavn 曲目的解密設定
+        secretKey: "??" # 解密所需的 secret key（需要自行取得）
+#        algorithm: "DES" # 使用的解密演算法（預設 "DES"）
+#        transformation: "DES/ECB/PKCS5Padding" # 使用的解密轉換（預設 "DES/ECB/PKCS5Padding"）
+#      proxy: # 若定義，JioSaavn 的 HTTP 請求將透過此代理。JioSaavn 有區域封鎖
+#        url: "https://example.org" # 要使用的 HTTP 代理
+#        username: "my-bot" # 用於代理驗證的使用者名稱（可選）
+#        password: "youshallpass" # 用於代理驗證的密碼（可選）
+
 lavalink:
   plugins:
 #    - dependency: "com.github.example:example-plugin:1.0.0" # 必填，插件的座標
