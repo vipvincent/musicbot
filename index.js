@@ -478,8 +478,28 @@ function bindPlayerEvents(player, guildId) {
   player.on('closed', async () => {
     const s = getLatestState();
     if (!s || s.stopping) return;
-    guildStates.delete(guildId);
-  });
+
+    // 延遲 5 秒，給底層重連機制一點時間（這是處理地區切換的必要緩衝）
+    setTimeout(() => {
+    // 1. 檢查 Discord 端：機器人的人頭是否還在頻道裡？
+    const botInVoice = client.guilds.cache.get(guildId)?.members.me?.voice?.channelId;
+
+    // 2. 檢查 Lavalink 端：Shoukaku 是否還持有這個伺服器的連線實例？
+    const hasLavalinkConnection = shoukaku.connections.has(guildId);
+
+    // 判斷邏輯：
+    if (!botInVoice && !hasLavalinkConnection) {
+      // 情況 A：Discord 沒人，且 Lavalink 也徹底斷開了 -> 確定是真的離開，清除記憶
+      guildStates.delete(guildId);
+    } 
+    else if (botInVoice && !hasLavalinkConnection) {
+      // 情況 B：這就是你擔心的「幽靈連線」！Discord 有人，但 Lavalink 放棄了。
+      // 此時我們也要清除記憶，並讓機器人主動退出 Discord 頻道，避免卡死。
+      shoukaku.leaveVoiceChannel(guildId); // 強制叫機器人離開
+      guildStates.delete(guildId);
+    }
+  }, 5000);
+});
 }
 
 function buildNowPlayingEmbed(state, guild) {
