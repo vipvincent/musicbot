@@ -236,6 +236,45 @@ function startIdleTimer(state, guildId) {
   }, 5 * 60 * 1000);
 }
 
+async function joinVoice(interaction) {
+  const voice = interaction.member?.voice;
+  if (!voice?.channelId) {
+    return { ok: false, message: ':x: 你要先進入一個語音頻道，我才能過去找你呀！' };
+  }
+
+  const state = getState(interaction.guildId);
+  const hasConnection = shoukaku.connections?.has(interaction.guildId);
+
+  if (hasConnection) {
+    try {
+      await shoukaku.leaveVoiceChannel(interaction.guildId);
+    } catch (e) {
+      console.error('[joinVoice] 離開語音頻道時發生錯誤', e);
+    }
+    state.player = null;
+  }
+
+  let player;
+  try {
+    player = await shoukaku.joinVoiceChannel({
+      guildId: interaction.guildId,
+      channelId: voice.channelId,
+      shardId: interaction.guild.shardId,
+      deaf: true
+    });
+  } catch (e) {
+    console.error('[joinVoice] 加入語音頻道時發生錯誤', e);
+    return { ok: false, message: ':x: 發生一點錯誤，請再試一次看看！' };
+  }
+
+  state.player = player;
+  state.player._listenersAttached = false;
+  state.textChannelId = interaction.channelId;
+  state.guild = interaction.guild;
+
+  return { ok: true, player, voice };
+}
+
 async function ensureVoice(interaction) {
   const voice = interaction.member?.voice;
 
@@ -257,33 +296,14 @@ async function ensureVoice(interaction) {
     return { ok: false, message: `:x: 不好意思，我已經在 ${channelMention} 當 DJ 囉！` };
   }
 
-  if (hasConnection) {
-    try {
-      await shoukaku.leaveVoiceChannel(interaction.guildId);
-    } catch (e) {
-      console.error('[ensureVoice] 離開語音頻道時發生錯誤', e);
-    }
-    state.player = null;
-  }
+  const result = await joinVoice(interaction);
+  if (!result.ok) return result;
 
-  let player;
-  try {
-    player = await shoukaku.joinVoiceChannel({
-      guildId: interaction.guildId,
-      channelId: voice.channelId,
-      shardId: interaction.guild.shardId,
-      deaf: true
-    });
-  } catch (e) {
-    console.error('[ensureVoice] 加入語音頻道時發生錯誤', e);
-    return { ok: false, message: ':x: 發生一點錯誤，請再試一次看看！' };
-  }
+  return { ok: true, message: joinedMessage(interaction.user.displayName, voice.channel) };
+}
 
-  state.player = player;
-  state.textChannelId = interaction.channelId;
-  state.guild = interaction.guild;
-
-  return { ok: true, message: `:sound: \`${interaction.user.displayName}\` 呼叫我啦！已抵達保護區：**${voice.channel.name}**` };
+function joinedMessage(displayName, channel) {
+  return `:sound: \`${displayName}\` 呼叫我啦！已抵達保護區：${channel}`;
 }
 
 function isYoutubeUrl(query) {
@@ -675,12 +695,6 @@ async function finalizePlay({ interaction, state, resolved, query, searchMessage
   if (resolved.type === 'empty') {
     return reply(`:x: 抱歉，我翻遍了也找不到跟 \`${query}\` 相關的音樂耶...`);
   }
-  if (resolved.type === 'error') {
-    const msg = resolved.error.includes('DRM')
-      ? ':x: 嗚嗚，這個平台因為版權保護不支援喔。'
-      : ':x: 糟糕，解析這首歌的資訊時出了點差錯，我可能沒辦法播放它喔！';
-    return reply(msg);
-  }
 
   const wasIdle = !state.current;
   const added = [];
@@ -737,6 +751,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (hasConnection && existingChannelId) {
           try {
             state.stopping = true;
+
+            // 記住舊頻道資訊，移動前先處理
+            const oldTextChannelId = state.textChannelId;
+            const oldTextChannel = oldTextChannelId ? interaction.guild.channels.cache.get(oldTextChannelId) : null;
+
+            // 刪除舊頻道的正在播放訊息
+            await deleteNowPlayingMsg(state);
+
+            // 在舊頻道送出「被拉走」通知（只在不同頻道時才送）
+            if (oldTextChannel && oldTextChannelId !== interaction.channelId) {
+              const newChannelMention = `<#${interaction.channelId}>`;
+              await oldTextChannel.send(
+                `:wave: \`${interaction.user.displayName}\` 把我拉走囉！如要繼續聆聽音樂，請前往 ${newChannelMention}。`
+              ).catch(() => {});
+            }
+
             interaction.guild.shard.send({
               op: 4,
               d: {
@@ -751,7 +781,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             state.textChannelId = interaction.channelId;
             state.guild = interaction.guild;
             await interaction.reply({
-              content: `:sound: \`${interaction.user.displayName}\` 把我拉過來囉！已移動至：**${voice.channel.name}**`
+              content: `:sound: \`${interaction.user.displayName}\` 把我拉過來囉！已移動至：${voice.channel}`
             });
             if (state.current) {
               await sendNowPlaying(state, interaction.guild, true);
@@ -767,26 +797,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply();
         state.stopping = false;
 
-        let player;
-        try {
-          player = await shoukaku.joinVoiceChannel({
-            guildId: interaction.guildId,
-            channelId: voice.channelId,
-            shardId: interaction.guild.shardId,
-            deaf: true
-          });
-        } catch (e) {
-          console.error('[join] 加入語音頻道時發生錯誤', e);
-          return interaction.editReply(':x: 發生一點錯誤，請再試一次看看！');
-        }
-
-        state.player = player;
-        state.player._listenersAttached = false;
-        state.textChannelId = interaction.channelId;
-        state.guild = interaction.guild;
+        const joined = await joinVoice(interaction);
+        if (!joined.ok) return interaction.editReply(joined.message);
 
         return interaction.editReply(
-          `:sound: \`${interaction.user.displayName}\` 呼叫我啦！已抵達保護區：**${voice.channel.name}**`
+          joinedMessage(interaction.user.displayName, joined.voice.channel)
         );
       }
 
