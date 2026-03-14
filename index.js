@@ -224,7 +224,7 @@ function startIdleTimer(state, guildId) {
       if (state.textChannelId && state.guild) {
         const channel = state.guild.channels.cache.get(state.textChannelId);
         if (channel) {
-          await channel.send('⏰ 偵測到長時間未播放音樂，機器人已自動離開語音頻道。');
+          await channel.send(':wave: 等了一陣子都沒播放音樂，我先退下啦，有需要再叫我～ :musical_note:');
         }
       }
       if (state.player) {
@@ -388,7 +388,7 @@ async function playNext(guildId) {
       try {
         const channel = state.guild.channels.cache.get(state.textChannelId);
         if (channel) {
-          await channel.send('✅ 所有音樂都播完啦！如果還想聽，隨時點歌喔 🎵');
+          await channel.send(':white_check_mark: 全部播完啦，想繼續聽的話歡迎隨時點歌～ :musical_note: ');
         }
       } catch (_) {}
     }
@@ -434,6 +434,7 @@ function bindPlayerEvents(player, guildId) {
   player.on('end', async (data) => {
     const s = getLatestState();
     if (!s || data.reason === 'replaced' || s.stopping) return;
+    await deleteNowPlayingMsg(s);
     await playNext(guildId);
   });
 
@@ -533,17 +534,17 @@ function buildQueueControls(page, maxPage) {
 async function sendQueueMessage(interaction, state, page) {
   const total = state.queue.length;
   if (total === 0) {
-    return interaction.reply(':x: 待播清單目前空空如也喔。');
+    return interaction.reply({ content: ':x: 待播清單目前空空如也喔。', flags: MessageFlags.Ephemeral });
   }
   const perPage = 10;
   const maxPage = Math.max(1, Math.ceil(total / perPage));
   if (page < 1 || page > maxPage) {
-    return interaction.reply(`:x: 頁數超出範圍囉，請輸入 1 ~ ${maxPage} 之間的數字。`);
+    return interaction.reply({ content: `:x: 頁數超出範圍囉，請輸入 1 ~ ${maxPage} 之間的數字。`, flags: MessageFlags.Ephemeral });
   }
 
   const { embed } = buildQueueEmbed(state, page, true);
   const controls = buildQueueControls(page, maxPage);
-  return interaction.reply({ embeds: [embed], components: [controls] });
+  return interaction.reply({ embeds: [embed], components: [controls], flags: MessageFlags.Ephemeral });
 }
 
 async function sendNowPlaying(state, guild, silent) {
@@ -568,6 +569,14 @@ async function editOrSendError(state, msg) {
       if (channel) await channel.send(msg);
     }
   } catch (_) {}
+}
+
+async function deleteNowPlayingMsg(state) {
+  if (!state.nowPlayingMsg) return;
+  try {
+    await state.nowPlayingMsg.delete();
+  } catch (_) {}
+  state.nowPlayingMsg = null;
 }
 
 async function handlePlay(interaction) {
@@ -791,6 +800,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const title = state.current.info?.title || '未知歌曲';
         await interaction.reply(`:track_next: \`${interaction.user.displayName}\` 卡歌啦！已幫您跳過 **${title}**。`);
+        await deleteNowPlayingMsg(state);
         return state.player.stopTrack();
       }
 
@@ -800,6 +810,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         state.stopping = true;
         state.queue = [];
         state.current = null;
+        await deleteNowPlayingMsg(state);
         try { await state.player.destroy(); } catch (_) {}
         await shoukaku.leaveVoiceChannel(interaction.guildId);
         guildStates.delete(interaction.guildId);
@@ -814,8 +825,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (interaction.commandName === 'nowplaying') {
         const embed = buildNowPlayingEmbed(state, interaction.guild);
-        if (!embed) return interaction.reply(':x: 目前沒有播放任何音樂喔。');
-        return interaction.reply({ embeds: [embed], components: [buildControls()] });
+        if (!embed) return interaction.reply({ content: ':x: 目前沒有播放任何音樂喔。', flags: MessageFlags.Ephemeral });
+        return interaction.reply({ embeds: [embed], components: [buildControls()], flags: MessageFlags.Ephemeral });
       }
 
       if (interaction.commandName === 'queue' || interaction.commandName === 'playlist') {
@@ -866,6 +877,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const title = state.current.info?.title || '未知歌曲';
         await interaction.reply({ content: `:track_next: \`${interaction.user.displayName}\` 卡歌啦！已幫您跳過 **${title}**。` });
+        await deleteNowPlayingMsg(state);
         return state.player.stopTrack();
       }
 
@@ -887,6 +899,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         state.stopping = true;
         state.queue = [];
         state.current = null;
+        await deleteNowPlayingMsg(state);
         try { await state.player.destroy(); } catch (_) {}
         await shoukaku.leaveVoiceChannel(interaction.guildId);
         guildStates.delete(interaction.guildId);
@@ -909,10 +922,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (interaction.customId === 'queue_clear') {
         if (state.queue.length === 0) {
-          return interaction.reply({ content: ':x: 待播清單本來就是空的啦！' });
+          return interaction.update({ content: ':x: 待播清單目前空空如也喔。', embeds: [], components: [] });
         }
         state.queue = [];
-        return interaction.reply({ content: `:white_check_mark: 痛快！\`${interaction.user.displayName}\` 把待播清單通通清空了！` });
+        await interaction.deferUpdate();
+        await interaction.followUp({ content: `:white_check_mark: 痛快！\`${interaction.user.displayName}\` 把待播清單通通清空了！` });
+        return interaction.editReply({ content: ':white_check_mark: 待播清單被你清空了喔！', embeds: [], components: [] });
       }
     }
   } catch (e) {
