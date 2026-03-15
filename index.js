@@ -462,7 +462,7 @@ async function playNext(guildId) {
   const item = state.queue.shift();
   state.current = item;
   const title = item?.info?.title || '未知';
-  log.info(`${guildLabel(guildId)} 開始播放："${title}"，剩餘佇列 ${state.queue.length} 首`);
+  log.info(`${guildLabel(guildId)} 開始播放："${title}"`);
 
   const connection = state.player.connection;
   if (connection && connection.state !== NODE_STATE_CONNECTED) {
