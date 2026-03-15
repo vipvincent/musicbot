@@ -131,12 +131,22 @@ plugins:
 
 lavalink:
   plugins:
+    # youtube source
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.0"
+      snapshot: false # Set to true if you want to use a snapshot version.
+    # lavasrc
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.1"
+      repository: "https://maven.lavalink.dev/releases" # this is optional for lavalink v4.0.0-beta.5 or greater
+      snapshot: false # set to true if you want to use snapshot builds (see below)
+
+#   # example
 #    - dependency: "com.github.example:example-plugin:1.0.0" # 必填，插件的座標
 #      repository: "https://maven.example.com/releases" # 可選，預設使用 Lavalink 的 releases repository
 #      snapshot: false # 可選，預設為 false，用於告訴 Lavalink 使用 snapshot repository 而不是 release repository
 #  pluginsDir: "./plugins" # 可選，預設為 "./plugins"
 #  defaultPluginRepository: "https://maven.lavalink.dev/releases" # 可選，預設為 Lavalink release repository
 #  defaultPluginSnapshotRepository: "https://maven.lavalink.dev/snapshots" # 可選，預設為 Lavalink snapshot repository
+
   server:
     password: "youshallnotpass"
     sources:
