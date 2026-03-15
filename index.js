@@ -29,10 +29,20 @@ const lavalinkPassword = process.env.LAVALINK_PASSWORD || 'youshallnotpass';
 const lavalinkSecure = (process.env.LAVALINK_SECURE || 'false').toLowerCase() === 'true';
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
+function getLocalISOString() {
+  const now = new Date();
+  const offset = -now.getTimezoneOffset();
+  if (offset === 0) return now.toISOString().slice(0, 23) + 'Z';
+  const sign = offset >= 0 ? '+' : '-';
+  const pad = (n) => String(Math.floor(Math.abs(n))).padStart(2, '0');
+  const offsetStr = `${sign}${pad(offset / 60)}:${pad(offset % 60)}`;
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 23) + offsetStr;
+}
 const log = {
-  info:  (...a) => console.log (`[${new Date().toISOString()}] INFO `, ...a),
-  warn:  (...a) => console.warn(`[${new Date().toISOString()}] WARN `, ...a),
-  error: (...a) => console.error(`[${new Date().toISOString()}] ERROR`, ...a),
+  info:  (...a) => console.log (`[${getLocalISOString()}] INFO `, ...a),
+  warn:  (...a) => console.warn(`[${getLocalISOString()}] WARN `, ...a),
+  error: (...a) => console.error(`[${getLocalISOString()}] ERROR`, ...a),
 };
 function guildLabel(guildId) {
   const g = client?.guilds?.cache?.get(guildId);
