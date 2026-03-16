@@ -527,20 +527,13 @@ function bindPlayerEvents(player, guildId) {
     setImmediate(() => playNext(guildId));
   });
 
-  player.on('stuck', async () => {
+  player.on('stuck', () => {
     const s = getLatestState();
     if (!s || s.stopping) return;
-    log.warn(`${guildLabel(guildId)} 播放卡住（stuck）："${s.current?.info?.title || '未知'}"`);
-    await deleteNowPlayingMsg(s);
-    if (s.textChannelId && s.guild) {
-      try {
-        const ch = s.guild.channels.cache.get(s.textChannelId);
-        if (ch) await ch.send(':x: 嗚嗚，這首歌卡住了，幫你跳到下一首！');
-      } catch (_) {}
-    }
-    s.current = null;
-    // stuck 事件不保證會觸發 end，必須主動驅動下一首
-    setImmediate(() => playNext(guildId));
+    const title = s.current?.info?.title || '未知';
+    // stuck 只代表緩衝區暫時停頓，Lavalink 會繼續嘗試
+    // 後續必然觸發 end（成功播完）或 exception（真的失敗），交由那兩個事件處理即可
+    log.warn(`${guildLabel(guildId)} 播放緩衝卡住（stuck）："${title}"，等待 Lavalink 自行恢復...`);
   });
 
   player.on('closed', async () => {
@@ -1109,5 +1102,10 @@ shoukaku.on('close', (name) => {
   lavalinkReady = [...shoukaku.nodes.values()].some((n) => n.state === NODE_STATE_CONNECTED);
   log.warn(`Lavalink 節點 [${name}] 連線關閉，lavalinkReady=${lavalinkReady}`);
 });
+
+log.info('程式啟動');
+
+process.on('SIGINT',  () => { log.info('程式停止'); process.exit(0); });
+process.on('SIGTERM', () => { log.info('程式停止'); process.exit(0); });
 
 client.login(token);
