@@ -479,6 +479,8 @@ async function _playNextInner(guildId, state) {
   if (state.queue.length === 0) {
     state.current = null;
     log.info(`${guildLabel(guildId)} 播放佇列已清空，啟動閒置計時器`);
+    // 佇列清空時刪除「正在播放」訊息
+    try { await deleteNowPlayingMsg(state); } catch (_) {}
     startIdleTimer(state, guildId);
     if (state.textChannelId && state.guild) {
       try {
@@ -498,10 +500,13 @@ async function _playNextInner(guildId, state) {
   log.info(`${guildLabel(guildId)} 開始播放："${title}"`);
 
   const connection = state.player.connection;
-  if (connection && connection.state !== NODE_STATE_CONNECTED) {
-    log.warn(`${guildLabel(guildId)} 連線尚未就緒，等待最多 3 秒...`);
+  // connection.state 在 Shoukaku 中為字串（'CONNECTED'），NODE_STATE_CONNECTED(1) 僅適用於 Node 狀態
+  // 直接比對字串以確保正確判斷連線是否就緒
+  const isConnected = () => connection.state === 'CONNECTED' || connection.state === NODE_STATE_CONNECTED;
+  if (connection && !isConnected()) {
+    log.warn(`${guildLabel(guildId)} 連線尚未就緒（state=${connection.state}），等待最多 3 秒...`);
     const start = Date.now();
-    while (Date.now() - start < 3000 && connection.state !== NODE_STATE_CONNECTED) {
+    while (Date.now() - start < 3000 && !isConnected()) {
       await sleep(250);
     }
   }
@@ -523,9 +528,7 @@ async function _playNextInner(guildId, state) {
     setImmediate(() => playNext(guildId));
     return;
   }
-  // playTrack 送出後，_playNextRunning 已無需持有
-  // 提前釋放，讓 end/exception 事件可以正常驅動下一首
-  state._playNextRunning = false;
+  // 注意：_playNextRunning 由外層 playNext() 的 finally 統一清除，此處不重複清除
 }
 
 function bindPlayerEvents(player, guildId) {
@@ -558,6 +561,7 @@ function bindPlayerEvents(player, guildId) {
   player.on('exception', async () => {
     const s = getLatestState();
     if (!s || s.stopping) return;
+    if (!s.current) return;  // end 已先處理，避免重複觸發 playNext
     const title = s.current?.info?.title || '未知';
     log.error(`${guildLabel(guildId)} 播放例外（exception）："${title}"`);
     await deleteNowPlayingMsg(s);
@@ -916,7 +920,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (hasConnection && existingChannelId) {
           try {
-            state.stopping = true;
+            // 移動頻道時不設 stopping=true，避免 end 事件忽略 playNext
+            // 僅暫時忽略玩家事件（Lavalink 繼續播放，不中斷）
             log.info(`${guildLabel(interaction.guildId)} /join：從 ${existingChannelId} 移動至 ${voice.channelId}（by ${interaction.user.username}）`);
 
             // 記住舊頻道資訊，移動前先處理
@@ -958,9 +963,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             log.error(`${guildLabel(interaction.guildId)} [join] 移動頻道時發生錯誤`, e);
             try { await interaction.reply({ content: ':x: 發生一點錯誤，請再試一次看看！' }); } catch (_) {}
             return;
-          } finally {
-            // 無論成功或失敗，確保 stopping 旗標一定被清除
-            state.stopping = false;
           }
         }
 
@@ -1000,7 +1002,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         clearIdle(state);
         await deleteNowPlayingMsg(state);
         try { await state.player.destroy(); } catch (_) {}
-        await shoukaku.leaveVoiceChannel(interaction.guildId);
+        try { await shoukaku.leaveVoiceChannel(interaction.guildId); } catch (_) {}
         guildStates.delete(interaction.guildId);
         return;
       }
