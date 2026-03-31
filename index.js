@@ -257,7 +257,7 @@ function startIdleTimer(state, guildId) {
     // 若 state 已被刪除（例如 /stop 後），直接忽略
     if (!guildStates.has(guildId)) return;
     state.idleTimer = null;
-    log.info(`${guildLabel(guildId)} 閒置逾時（5 分鐘），自動離開語音頻道`);
+    log.info(`${guildLabel(guildId)} 閒置逾時（30 分鐘），自動離開語音頻道`);
     state.stopping = true;
     state.queue = [];
     state.current = null;
@@ -285,7 +285,7 @@ function startIdleTimer(state, guildId) {
       log.error(`${guildLabel(guildId)} [idleTimer] 離開語音頻道失敗`, e);
     }
     guildStates.delete(guildId);
-  }, 5 * 60 * 1000);
+  }, 30 * 60 * 1000);
 }
 
 async function joinVoice(interaction) {
