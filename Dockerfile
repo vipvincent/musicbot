@@ -1,5 +1,5 @@
-# 使用官方 Node.js LTS Slim 版本
-FROM node:lts-slim
+# 使用官方 Node.js LTS Alpine 版本
+FROM node:lts-alpine
 
 # 設定工作目錄
 WORKDIR /app
