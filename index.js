@@ -11,7 +11,10 @@ const {
   ButtonBuilder,
   ButtonStyle,
   Events,
-  MessageFlags
+  MessageFlags,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle
 } = require('discord.js');
 const { Shoukaku, Connectors } = require('shoukaku');
 
@@ -132,9 +135,6 @@ shoukaku.addNode = function (options) {
   }
 };
 
-// 對初始節點（建構子已加入）補掛監聽
-// setImmediate(() => attachNodeDisconnectHandler('default'));
-
 let isReconnecting = false;
 let isWaitingReconnect = false;  // 已排程重連，避免重複印 log
 
@@ -190,14 +190,13 @@ async function resumeAllGuilds() {
         continue;
       }
 
-      // 移除舊 player 的所有事件監聽器，防止孤兒 listener 操作過時的 state
+      // 移除舊 player 的監聽器，防止孤兒 listener 操作過時的 state
       if (state.player) {
         try { state.player.removeAllListeners(); } catch (_) { }
         state.player._listenersAttached = false;
       }
       state.player = player;
       state.player._listenersAttached = false;
-      // 清除舊 player 上可能殘留的事件監聽器，避免孤兒 listener 操作過時的 state
 
       // 將 current 放回 queue 最前端重新播放
       if (state.current) {
@@ -217,37 +216,66 @@ async function resumeAllGuilds() {
 
 
 const commandData = [
-  new SlashCommandBuilder().setName('join').setDescription('讓機器人加入您目前的語音頻道'),
+  new SlashCommandBuilder()
+    .setName('join')
+    .setDescription('讓機器人加入您目前的語音頻道'),
   new SlashCommandBuilder()
     .setName('play')
     .setDescription('播放音樂 (支援網址、關鍵字、播放清單)')
     .addStringOption((opt) =>
-      opt.setName('song').setDescription('請輸入網址、關鍵字或播放清單').setRequired(true)
+      opt
+        .setName('song')
+        .setDescription('請輸入網址、關鍵字或播放清單')
+        .setRequired(true)
     ),
   new SlashCommandBuilder()
     .setName('search')
     .setDescription('搜尋並播放音樂 (與 /play 相同)')
     .addStringOption((opt) =>
-      opt.setName('song').setDescription('請輸入網址、關鍵字或播放清單').setRequired(true)
+      opt
+        .setName('song')
+        .setDescription('請輸入網址、關鍵字或播放清單')
+        .setRequired(true)
     ),
-  new SlashCommandBuilder().setName('skip').setDescription('跳過當前歌曲'),
-  new SlashCommandBuilder().setName('next').setDescription('跳過當前歌曲'),
-  new SlashCommandBuilder().setName('stop').setDescription('停止播放並清空隊列'),
-  new SlashCommandBuilder().setName('leave').setDescription('離開語音頻道'),
+  new SlashCommandBuilder()
+    .setName('skip')
+    .setDescription('跳過當前歌曲'),
+  new SlashCommandBuilder()
+    .setName('next')
+    .setDescription('跳過當前歌曲'),
+  new SlashCommandBuilder()
+    .setName('stop')
+    .setDescription('停止播放並清空隊列'),
+  new SlashCommandBuilder()
+    .setName('leave')
+    .setDescription('離開語音頻道'),
   new SlashCommandBuilder()
     .setName('queue')
     .setDescription('查看當前待播清單')
     .addIntegerOption((opt) =>
-      opt.setName('page').setDescription('要查看的頁數').setRequired(false)
+      opt
+        .setName('page')
+        .setDescription('要查看的頁數')
+        .setRequired(false)
     ),
   new SlashCommandBuilder()
     .setName('playlist')
     .setDescription('查看當前待播清單')
     .addIntegerOption((opt) =>
-      opt.setName('page').setDescription('要查看的頁數').setRequired(false)
+      opt
+        .setName('page')
+        .setDescription('要查看的頁數')
+        .setRequired(false)
     ),
-  new SlashCommandBuilder().setName('clear').setDescription('清空待播清單'),
-  new SlashCommandBuilder().setName('nowplaying').setDescription('查看目前正在播放的歌曲資訊')
+  new SlashCommandBuilder()
+    .setName('clear')
+    .setDescription('清空待播清單'),
+  new SlashCommandBuilder()
+    .setName('nowplaying')
+    .setDescription('查看目前正在播放的歌曲資訊'),
+  new SlashCommandBuilder()
+    .setName('autorecommend')
+    .setDescription('開啟或關閉自動推薦（佇列播完後自動推薦相似歌曲）')
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -267,7 +295,14 @@ function getState(guildId) {
       guild: null,
       stopping: false,
       nowPlayingMsg: null,
-      _playNextRunning: false
+      _playNextRunning: false,
+      autoRecommend: true,
+      lastPlayedTitle: null,
+      lastPlayedUri: null,
+      seedTrackTitle: null,
+      seedTrackUri: null,
+      recommendCache: [], // 存放種子歌曲產生的推薦清單 (快取)
+      history: [] // 紀錄最近播放過的歌曲，避免重複推薦
     });
   }
   return guildStates.get(guildId);
@@ -327,7 +362,7 @@ async function joinVoice(interaction) {
 
   if (hasConnection) {
     if (state.player) {
-      try { state.player.removeAllListeners(); } catch (_) {}
+      try { state.player.removeAllListeners(); } catch (_) { }
       state.player._listenersAttached = false;
     }
     try {
@@ -441,13 +476,7 @@ async function resolveTracks(query, mode = 'auto') {
 
   if (isUrl && isYoutubeUrl(query)) {
     try {
-      const url = new URL(query);
-      const host = url.hostname.replace(/^www\./, '');
-      const videoId = host === 'youtu.be'
-        ? (url.pathname.slice(1) || null)
-        : (url.searchParams.get('v') || null);
-      const listId = url.searchParams.get('list') || null;
-
+      const { videoId, listId } = parseYoutubeUrl(query);
       if (mode === 'playlist' && listId) {
         search = `https://www.youtube.com/playlist?list=${listId}`;
       } else if (mode === 'single' && videoId) {
@@ -514,28 +543,139 @@ async function _playNextInner(guildId, state) {
     state.current = null;
     // 佇列清空時刪除「正在播放」訊息
     try { await deleteNowPlayingMsg(state); } catch (_) { }
-    startIdleTimer(state, guildId);
-    if (state.textChannelId && state.guild) {
+
+    // ── 自動推薦：佇列播完後，若已開啟則搜尋相似歌曲 ──────────────────────────
+    if (state.autoRecommend && state.seedTrackTitle) {
       try {
-        const channel = state.guild.channels.cache.get(state.textChannelId);
-        if (channel) {
-          await channel.send('✅ 全部播完啦，想繼續聽的話歡迎隨時點歌～ 🎵 ');
+        const normalizeTitle = (t) => (t || '')
+          .toLowerCase()
+          .replace(/\((official|lyric|video|hd|4k|audio|music|mv).*?\)/gi, '')
+          .replace(/\[(official|lyric|video|hd|4k|audio|music|mv).*?\]/gi, '')
+          .replace(/\(.*?\)|\[.*?\]/g, '')
+          .replace(/[^\w\s\u3000-\u9fff]/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        const seedNorm = normalizeTitle(state.seedTrackTitle);
+        const seedId = parseYoutubeUrl(state.seedTrackUri).videoId;
+        const historyIds = state.history.map(h => h.id).filter(Boolean);
+        const historyTitles = state.history.map(h => normalizeTitle(h.title));
+
+        const isDuplicate = (t) => {
+          const tid = t.info?.identifier || t.id;
+          const ttitle = normalizeTitle(t.info?.title || t.title);
+          return (tid && (historyIds.includes(tid) || tid === seedId)) ||
+            historyTitles.includes(ttitle) ||
+            ttitle === seedNorm;
+        };
+
+        // 如果快取裡沒歌了，才去取得新的 Mix
+        if (state.recommendCache.length === 0) {
+          const { videoId } = parseYoutubeUrl(state.seedTrackUri);
+          if (videoId) {
+            const mixUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
+            const node = shoukaku.getIdealNode();
+            let mixResult = null;
+            try { mixResult = await node.rest.resolve(mixUrl); } catch (_) { }
+
+            if (mixResult?.loadType === 'playlist' && mixResult.data?.tracks?.length > 1) {
+              state.recommendCache = mixResult.data.tracks
+                .slice(1) // 跳過種子原曲
+                .filter(t => !isDuplicate(t))
+                .map(t => ({
+                  encoded: t?.encoded || t?.track || null,
+                  track: t,
+                  info: t.info || {},
+                  requesterId: null,
+                  requesterName: '自動推薦',
+                  autoRecommended: true
+                }));
+
+              log.info(`${guildLabel(guildId)} [autoRecommend] 已為種子歌曲「${state.seedTrackTitle}」更新推薦快取 (${state.recommendCache.length} 首)`);
+            }
+          }
         }
-      } catch (_) { }
+
+        // 從快取中取出下一首，取出時再次檢查是否重複 (防範快取期間手動點了重複的歌)
+        let foundItem = null;
+        while (state.recommendCache.length > 0) {
+          const candidate = state.recommendCache.shift();
+          if (!isDuplicate(candidate)) {
+            foundItem = candidate;
+            break;
+          }
+        }
+
+        if (foundItem) {
+          state.queue.push(foundItem);
+        } else if (state.recommendCache.length === 0) {
+          // 如果快取清空後仍找不到適合的歌，下一首會再次觸發重新抓取
+          log.info(`${guildLabel(guildId)} [autoRecommend] 快取候選曲目均已撥放或重複`);
+        }
+      } catch (e) {
+        log.warn(`${guildLabel(guildId)} [autoRecommend] 推薦過程發生錯誤`, e);
+      }
     }
-    return false;
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // 若推薦成功加入佇列，直接繼續播放（跳過 idle）；否則才進入 idle
+    if (state.queue.length === 0) {
+      startIdleTimer(state, guildId);
+      if (state.textChannelId && state.guild) {
+        try {
+          const channel = state.guild.channels.cache.get(state.textChannelId);
+          if (channel) {
+            const row = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId('music_add')
+                .setLabel('新增歌曲')
+                .setStyle(ButtonStyle.Success)
+                .setEmoji('➕'),
+              new ButtonBuilder()
+                .setCustomId('music_leave')
+                .setLabel('離開')
+                .setStyle(ButtonStyle.Danger)
+                .setEmoji('👋')
+            );
+            await channel.send({
+              content: '✅ 全部播完啦，想繼續聽的話歡迎隨時點歌～ 🎵 ',
+              components: [row]
+            });
+          }
+        } catch (_) { }
+      }
+      return false;
+    }
+    // 佇列有推薦歌曲，往下繼續播放
   }
 
   clearIdle(state);
   const item = state.queue.shift();
   state.current = item;
+  // 紀錄歷史與最後播放資訊
+  if (item?.info?.title) {
+    state.lastPlayedTitle = item.info.title;
+    // 更新歷史紀錄 (保持最近 20 首)
+    state.history.push({
+      title: item.info.title,
+      id: item.info.identifier,
+      uri: item.info.uri
+    });
+    if (state.history.length > 20) state.history.shift();
+  }
+  if (item?.info?.uri) state.lastPlayedUri = item.info.uri;
+
+  // 如果這首歌不是自動推薦的，就將它設為「種子歌曲」，並清空先前的推薦快取
+  if (!item.autoRecommended) {
+    state.seedTrackTitle = item.info?.title || null;
+    state.seedTrackUri = item.info?.uri || null;
+    state.recommendCache = [];
+  }
   const title = item?.info?.title || '未知';
-  log.info(`${guildLabel(guildId)} [playNext] 開始播放："${title}"`);
+  log.info(`${guildLabel(guildId)} [playNext] ${item.autoRecommended ? '開始播放推薦' : '開始播放'}："${title}"`);
 
   const connection = state.player.connection;
-  // connection.state 在 Shoukaku 中為字串（'CONNECTED'），NODE_STATE_CONNECTED(1) 僅適用於 Node 狀態
-  // 直接比對字串以確保正確判斷連線是否就緒
-  const isConnected = () => connection.state === 'CONNECTED' || connection.state === NODE_STATE_CONNECTED;
+  const isConnected = () => connection.state === 'CONNECTED';
   if (connection && !isConnected()) {
     log.warn(`${guildLabel(guildId)} [playNext] 連線尚未就緒（state=${connection.state}），等待最多 3 秒`);
     const start = Date.now();
@@ -589,7 +729,6 @@ function bindPlayerEvents(player, guildId) {
     });
   };
 
-  const getEventEncoded = (data) => typeof data?.track === 'string' ? data.track : (data?.track?.encoded || data?.track?.track);
   const getCurrentEncoded = (s) => s?.current?.encoded || s?.current?.track?.encoded || s?.current?.track?.track;
 
   player.on('end', async (data) => {
@@ -646,9 +785,8 @@ function bindPlayerEvents(player, guildId) {
 
     await deleteNowPlayingMsg(s);
 
-    // exception 事件代表 playTrack 已成功送出（JS 層沒拋例外），但 Lavalink 端播放失敗。
-    // 此時 _playNextInner 仍在 await playTrack()，_playNextRunning 為 true，scheduleRetry 將是 false。
-    // 需等 _playNextRunning 釋放後再排程，確保不與 finally 競爭。
+    // exception 代表 playTrack 成功送出（JS 層無例外），但 Lavalink 端播放失敗
+    // 需等 _playNextRunning 釋放後再排程，確保不與 playNext 的 finally 競爭。
     const waitAndSchedule = () => {
       const latest = getLatestState();
       if (!latest || latest.stopping) return;
@@ -717,7 +855,7 @@ function buildNowPlayingEmbed(state, guild) {
   const title = current.info.title || '未知';
   const uri = current.info.uri || '';
   const author = current.info.author || '未知';
-  const requester = current.requesterId ? `<@${current.requesterId}>` : '未知';
+  const requester = current.autoRecommended ? '🤖 推薦歌曲' : (current.requesterId ? `<@${current.requesterId}>` : '未知');
   const channelName = guild.members.me?.voice?.channel?.toString() || '未知';
 
   const embed = new EmbedBuilder()
@@ -733,13 +871,44 @@ function buildNowPlayingEmbed(state, guild) {
   return embed;
 }
 
-function buildControls() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('music_skip').setLabel('下一首').setEmoji('⏭️').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('music_queue').setLabel('待播清單').setEmoji('📜').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('music_clear').setLabel('清空').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('music_leave').setLabel('離開').setEmoji('🚪').setStyle(ButtonStyle.Danger)
+function buildControls(autoRecommend = true) {
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('music_add')
+      .setLabel('新增歌曲')
+      .setEmoji('➕')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId('music_skip')
+      .setLabel('下一首')
+      .setEmoji('⏭️')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('music_queue')
+      .setLabel('待播清單')
+      .setEmoji('📜')
+      .setStyle(ButtonStyle.Secondary)
   );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('music_autorecommend')
+      .setLabel(autoRecommend ? '自動推薦：開' : '自動推薦：關')
+      .setEmoji('🤖')
+      .setStyle(autoRecommend ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('music_clear')
+      .setLabel('清空')
+      .setEmoji('🗑️')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId('music_leave')
+      .setLabel('離開')
+      .setEmoji('👋')
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return [row1, row2];
 }
 
 function buildQueueEmbed(state, page, withIcon) {
@@ -809,7 +978,7 @@ async function sendNowPlaying(state, guild, silent) {
     try { await state.nowPlayingMsg.delete(); } catch (_) { }
     state.nowPlayingMsg = null;
   }
-  const payload = { embeds: [embed], components: [buildControls()] };
+  const payload = { embeds: [embed], components: buildControls(state.autoRecommend) };
   if (silent) payload.flags = MessageFlags.SuppressNotifications;
   const msg = await channel.send(payload);
   state.nowPlayingMsg = msg;
@@ -846,18 +1015,28 @@ async function handlePlay(interaction) {
   let searchMessage;
   if (res.message) {
     await interaction.editReply(res.message);
-    searchMessage = await interaction.followUp({ content: '🔎 正在搜尋音樂中...' });
+    searchMessage = await interaction.followUp({ content: `🔎 正在搜尋 \`${query}\` 中...` });
   } else {
-    searchMessage = await interaction.editReply('🔎 正在搜尋音樂中...');
+    searchMessage = await interaction.editReply(`🔎 正在搜尋 \`${query}\` 中...`);
   }
+
+  return handlePlayRequest(interaction, query, state, searchMessage);
+}
+
+async function handlePlayRequest(interaction, query, state, searchMessage) {
+  const guildId = interaction.guildId;
+  const userName = interaction.user.displayName || interaction.user.username;
+  log.info(`${guildLabel(guildId)} [handlePlayRequest] 開始處理查詢："${query}" (by ${userName})`);
 
   const { videoId, listId } = parseYoutubeUrl(query);
   if (videoId && listId) {
+    log.info(`${guildLabel(guildId)} [handlePlayRequest] 偵測到混合連結，顯示選擇選單`);
     const [singleResolved, playlistResolved] = await Promise.all([
       resolveTracks(query, 'single'),
       resolveTracks(query, 'playlist')
     ]);
     const videoTitle = singleResolved.tracks?.[0]?.info?.title || '此影片';
+    const playlistName = playlistResolved.info?.name || '此播放清單';
     const playlistCount = playlistResolved.tracks?.length ?? 0;
     const TIMEOUT_MS = 10_000;
 
@@ -866,19 +1045,21 @@ async function handlePlay(interaction) {
       query,
       guildId: interaction.guildId,
       userId: interaction.user.id,
-      userName: interaction.user.displayName || interaction.user.username,
+      userName,
       singleResolved,
       playlistResolved,
       expiresAt: Date.now() + TIMEOUT_MS,
       timeoutId: null
     });
 
-    const row = new ActionRowBuilder().addComponents(
+    const row1 = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId('play_single')
         .setLabel(`只加入 ${videoTitle}`.slice(0, 80))
         .setEmoji('🎵')
-        .setStyle(ButtonStyle.Primary),
+        .setStyle(ButtonStyle.Primary)
+    );
+    const row2 = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId('play_playlist')
         .setLabel(`加入整個播放清單共 ${playlistCount} 首`.slice(0, 80))
@@ -886,14 +1067,14 @@ async function handlePlay(interaction) {
         .setStyle(ButtonStyle.Success)
     );
 
-    const msg = `<@${interaction.user.id}> \n此影片連結同時包含播放清單，\n要只加入 **${videoTitle}**，還是加入整個播放清單共 **${playlistCount}** 首？\n-# 10 秒後將只加入 **${videoTitle}**。`;
-    const choiceMsg = await searchMessage.edit({ content: msg, components: [row] });
+    const msg = `<@${interaction.user.id}> \n此影片連結同時包含播放清單，\n要只加入 **${videoTitle}**，\n還是加入整個播放清單共 **${playlistCount}** 首？\n-# 10 秒後將只加入 **${videoTitle}**。`;
+    const choiceMsg = await searchMessage.edit({ content: msg, components: [row1, row2] });
 
     const timeoutId = setTimeout(async () => {
       const p = pendingPlayChoices.get(pendingKey);
       if (!p || p.timeoutId !== timeoutId) return;
       pendingPlayChoices.delete(pendingKey);
-      // 先清除按鈕，失敗時靜默忽略（訊息可能已被刪除）
+      log.info(`${guildLabel(guildId)} [handlePlayRequest] 選擇選單已逾時，自動選擇播放單曲`);
       try { await choiceMsg.edit({ components: [] }); } catch (_) { }
       try {
         const autoState = getState(p.guildId);
@@ -908,7 +1089,7 @@ async function handlePlay(interaction) {
           guildId: p.guildId
         });
       } catch (e) {
-        log.error(`${guildLabel(p.guildId)} [autoPlay] 自動加入單首時發生錯誤`, e);
+        log.error(`${guildLabel(p.guildId)} [finalizePlay] 自動加入單首時發生錯誤`, e);
       }
     }, TIMEOUT_MS);
 
@@ -956,9 +1137,12 @@ async function finalizePlay({ interaction, state, resolved, query, searchMessage
   }
 
   if (resolved.type === 'playlist') {
-    await reply(`✅ \`${userName}\` 一口氣點了 **${added.length}** 首音樂，已經通通塞進清單啦！`);
+    const playlistName = resolved.info?.name || '此播放清單';
+    log.info(`${guildLabel(guildId || state.guild?.id)} [finalizePlay] 加入播放清單："${playlistName}" (${added.length} 首) (by ${userName})`);
+    await reply(`✅ \`${userName}\` 一口氣點了 **${added.length}** 首歌曲(**${playlistName}**)，已經通通塞進清單啦！`);
   } else {
     const title = added[0]?.info?.title || '未知';
+    log.info(`${guildLabel(guildId || state.guild?.id)} [finalizePlay] 加入單曲："${title}" (by ${userName})`);
     await reply(`✅ \`${userName}\` 點的 **${title}** 已經加入隊列排隊囉！`);
   }
 
@@ -976,7 +1160,7 @@ client.once(Events.ClientReady, async () => {
   await client.application.fetch();
   await registerCommands();
   log.info(`[Main] 機器人已上線，登入身份：${client.user.tag}`);
-  
+
   // 機器人上線後，初始化 Lavalink 連線
   try {
     shoukaku.addNode({
@@ -993,9 +1177,35 @@ client.once(Events.ClientReady, async () => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId === 'add_song_modal') {
+        const query = interaction.fields.getTextInputValue('song_query');
+        log.info(`${guildLabel(interaction.guildId)} [Interaction:Modal] 提交「新增歌曲」表單，查詢內容："${query}" (by ${interaction.user.username})`);
+        if (!query) return interaction.reply({ content: '❌ 請輸入歌曲網址或關鍵字！', flags: MessageFlags.Ephemeral });
+
+        await interaction.deferReply();
+        const res = await ensureVoice(interaction);
+        if (!res.ok) return interaction.editReply(res.message);
+
+        const state = getState(interaction.guildId);
+        if (!state.player) return interaction.editReply('❌ 發生一點錯誤，請再試一次看看！');
+
+        let searchMessage;
+        if (res.message) {
+          await interaction.editReply(res.message);
+          searchMessage = await interaction.followUp({ content: `🔎 正在搜尋 \`${query}\` 中...` });
+        } else {
+          searchMessage = await interaction.editReply(`🔎 正在搜尋 \`${query}\` 中...`);
+        }
+
+        return handlePlayRequest(interaction, query, state, searchMessage);
+      }
+    }
+
     if (interaction.isChatInputCommand()) {
       const state = getState(interaction.guildId);
       state.guild = interaction.guild;
+      log.info(`${guildLabel(interaction.guildId)} [Interaction:Command] 執行指令：/${interaction.commandName} (by ${interaction.user.username})`);
 
       if (interaction.commandName === 'join') {
         const voice = interaction.member?.voice;
@@ -1016,7 +1226,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           try {
             // 移動頻道時不設 stopping=true，避免 end 事件忽略 playNext
             // 僅暫時忽略玩家事件（Lavalink 繼續播放，不中斷）
-            log.info(`${guildLabel(interaction.guildId)} [cmd:/join] 從 ${existingChannelId} 移動至 ${voice.channelId}（by ${interaction.user.username}）`);
+            log.info(`${guildLabel(interaction.guildId)} [Interaction:Command] /join 從 ${existingChannelId} 移動至 ${voice.channelId} (by ${interaction.user.username})`);
 
             // 記住舊頻道資訊，移動前先處理
             const oldTextChannelId = state.textChannelId;
@@ -1054,7 +1264,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
             return;
           } catch (e) {
-            log.error(`${guildLabel(interaction.guildId)} [cmd:/join] 移動頻道時發生錯誤`, e);
+            log.error(`${guildLabel(interaction.guildId)} [Interaction:Command] 移動頻道時發生錯誤`, e);
             try { await interaction.reply({ content: '❌ 發生一點錯誤，請再試一次看看！' }); } catch (_) { }
             return;
           }
@@ -1066,6 +1276,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const joined = await joinVoice(interaction);
         if (!joined.ok) return interaction.editReply(joined.message);
 
+        log.info(`${guildLabel(interaction.guildId)} [Interaction:Command] /join 加入頻道：${joined.voice.channel.name} (by ${interaction.user.username})`);
         return interaction.editReply(
           joinedMessage(interaction.user.displayName, joined.voice.channel)
         );
@@ -1080,7 +1291,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply('❌ 現在很安靜唷，沒有音樂可以跳過啦！');
         }
         const title = state.current.info?.title || '未知歌曲';
-        log.info(`${guildLabel(interaction.guildId)} [cmd:/skip] 跳過："${title}"（by ${interaction.user.username}）`);
+        log.info(`${guildLabel(interaction.guildId)} [playNext] 使用者請求跳過："${title}" (by ${interaction.user.username})`);
         await interaction.reply(`⏭️ \`${interaction.user.displayName}\` 卡歌啦！已幫您跳過 **${title}**。`);
         // 先停止當前播放
         try { state.player.stopTrack(); } catch (_) { }
@@ -1091,7 +1302,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (interaction.commandName === 'stop' || interaction.commandName === 'leave') {
         if (!state.player && !shoukaku.connections?.has(interaction.guildId)) return interaction.reply('❌ 我現在不在頻道裡喔！');
-        log.info(`${guildLabel(interaction.guildId)} [cmd:/${interaction.commandName}] 停止並離開（by ${interaction.user.username}）`);
+        log.info(`${guildLabel(interaction.guildId)} [guildState] 停止播放並離開語音頻道`);
         await interaction.reply(`👋 \`${interaction.user.displayName}\` 讓我先退下了，停止播放並退出頻道囉！`);
         state.stopping = true;
         state.queue = [];
@@ -1106,15 +1317,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (interaction.commandName === 'clear') {
         if (state.queue.length === 0) return interaction.reply('❌ 待播清單本來就是空的啦！');
-        log.info(`${guildLabel(interaction.guildId)} [cmd:/clear] 清空 ${state.queue.length} 首（by ${interaction.user.username}）`);
+        log.info(`${guildLabel(interaction.guildId)} [queue] 清空待播清單（共 ${state.queue.length} 首）`);
         state.queue = [];
         return interaction.reply(`✅ 痛快！\`${interaction.user.displayName}\` 把待播清單通通清空了！`);
       }
 
       if (interaction.commandName === 'nowplaying') {
+        log.info(`${guildLabel(interaction.guildId)} [Interaction:Command] /${interaction.commandName} 查看目前播放`);
         const embed = buildNowPlayingEmbed(state, interaction.guild);
         if (!embed) return interaction.reply({ content: '❌ 目前沒有播放任何音樂喔。', flags: MessageFlags.Ephemeral });
-        return interaction.reply({ embeds: [embed], components: [buildControls()], flags: MessageFlags.Ephemeral });
+        return interaction.reply({ embeds: [embed], components: buildControls(state.autoRecommend), flags: MessageFlags.Ephemeral });
+      }
+
+      if (interaction.commandName === 'autorecommend') {
+        state.autoRecommend = !state.autoRecommend;
+        log.info(`${guildLabel(interaction.guildId)} [guildState] 自動推薦設定改為：${state.autoRecommend ? '開啟' : '關閉'}`);
+        if (state.nowPlayingMsg) {
+          try { await state.nowPlayingMsg.edit({ components: buildControls(state.autoRecommend) }); } catch (_) { }
+        }
+        return interaction.reply({
+          content: state.autoRecommend
+            ? `🤖 \`${interaction.user.displayName}\` 開啟了自動推薦！佇列播完後將自動推薦相似歌曲～`
+            : `🤖 \`${interaction.user.displayName}\` 關閉了自動推薦。`
+        });
       }
 
       if (interaction.commandName === 'queue' || interaction.commandName === 'playlist') {
@@ -1125,6 +1350,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isButton()) {
       const state = getState(interaction.guildId);
+      log.info(`${guildLabel(interaction.guildId)} [Interaction:Button] 點擊按鈕：${interaction.customId} (by ${interaction.user.username})`);
 
       if (interaction.customId === 'play_single' || interaction.customId === 'play_playlist') {
         const pendingKey = `${interaction.user.id}:${interaction.guildId}`;
@@ -1146,7 +1372,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // 確保 state.guild 有值（按鈕互動不會走 slash command 的 state.guild 賦值路徑）
         if (!state.guild) state.guild = interaction.guild;
 
-        await interaction.update({ content: '🔎 正在搜尋音樂中...', components: [] });
+        await interaction.update({ content: '📥 正在加入歌曲中...', components: [] });
         const updatedMsg = await interaction.fetchReply();
 
         const resolved = interaction.customId === 'play_single'
@@ -1168,7 +1394,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({ content: '❌ 現在很安靜唷，沒有音樂可以跳過啦！' });
         }
         const title = state.current.info?.title || '未知歌曲';
-        log.info(`${guildLabel(interaction.guildId)} [btn:skip] 跳過："${title}"（by ${interaction.user.username}）`);
+        log.info(`${guildLabel(interaction.guildId)} [playNext] 跳過："${title}" (by ${interaction.user.username})`);
         await interaction.reply({ content: `⏭️ \`${interaction.user.displayName}\` 卡歌啦！已幫您跳過 **${title}**。` });
         // 先停止當前播放
         try { state.player.stopTrack(); } catch (_) { }
@@ -1185,14 +1411,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (state.queue.length === 0) {
           return interaction.reply({ content: '❌ 待播清單本來就是空的啦！' });
         }
-        log.info(`${guildLabel(interaction.guildId)} [btn:clear] 清空佇列 ${state.queue.length} 首（by ${interaction.user.username}）`);
+        log.info(`${guildLabel(interaction.guildId)} [queue] 清空待播清單（共 ${state.queue.length} 首） (by ${interaction.user.username})`);
         state.queue = [];
         return interaction.reply({ content: `✅ 痛快！\`${interaction.user.displayName}\` 把待播清單通通清空了！` });
       }
 
+      if (interaction.customId === 'music_autorecommend') {
+        state.autoRecommend = !state.autoRecommend;
+        log.info(`${guildLabel(interaction.guildId)} [autoRecommend] 切換自動推薦：${state.autoRecommend ? '開啟' : '關閉'} (by ${interaction.user.username})`);
+        if (state.nowPlayingMsg) {
+          try { await state.nowPlayingMsg.edit({ components: buildControls(state.autoRecommend) }); } catch (_) { }
+        }
+        return interaction.reply({
+          content: state.autoRecommend
+            ? `🤖 \`${interaction.user.displayName}\` 開啟了自動推薦！佇列播完後將自動推薦相似歌曲～`
+            : `🤖 \`${interaction.user.displayName}\` 關閉了自動推薦。`
+        });
+      }
+
       if (interaction.customId === 'music_leave') {
         if (!state.player) return interaction.reply({ content: '❌ 我現在不在頻道裡喔！' });
-        log.info(`${guildLabel(interaction.guildId)} [btn:leave] 離開語音頻道（by ${interaction.user.username}）`);
+        log.info(`${guildLabel(interaction.guildId)} [guildState] 離開語音頻道 (by ${interaction.user.username})`);
         await interaction.reply({ content: `👋 \`${interaction.user.displayName}\` 按下了離開，我先退下囉！` });
         state.stopping = true;
         state.queue = [];
@@ -1203,6 +1442,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
         try { await shoukaku.leaveVoiceChannel(interaction.guildId); } catch (_) { }
         guildStates.delete(interaction.guildId);
         return;
+      }
+
+      if (interaction.customId === 'music_add') {
+        const modal = new ModalBuilder()
+          .setCustomId('add_song_modal')
+          .setTitle('新增歌曲');
+
+        const songInput = new TextInputBuilder()
+          .setCustomId('song_query')
+          .setLabel('歌曲網址或關鍵字')
+          .setPlaceholder('在此貼上 YouTube 連結或輸入關鍵字...')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
+
+        const row = new ActionRowBuilder()
+          .addComponents(songInput);
+        modal.addComponents(row);
+
+        return interaction.showModal(modal);
       }
 
       if (interaction.customId.startsWith('queue_prev:') || interaction.customId.startsWith('queue_next:')) {
