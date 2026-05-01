@@ -81,7 +81,6 @@
 ```env
 # Discord
 DISCORD_BOT_TOKEN="your_discord_bot_token"
-DISCORD_CLIENT_ID="your_discord_client_id"
 ```
 
 ## 4.運行
