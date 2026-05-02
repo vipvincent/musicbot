@@ -571,6 +571,17 @@ async function _playNextInner(guildId, state) {
 
         // 如果快取裡沒歌了，才去取得新的 Mix
         if (state.recommendCache.length === 0) {
+          // 種子輪換
+          const lastHistory = state.history[state.history.length - 1];
+          if (lastHistory?.uri && lastHistory.uri !== state.seedTrackUri) {
+            const { videoId: lastVideoId } = parseYoutubeUrl(lastHistory.uri);
+            if (lastVideoId) {
+              log.info(`${guildLabel(guildId)} [autoRecommend] 種子輪換：「${state.seedTrackTitle}」→「${lastHistory.title}」`);
+              state.seedTrackTitle = lastHistory.title;
+              state.seedTrackUri = lastHistory.uri;
+            }
+          }
+
           const { videoId } = parseYoutubeUrl(state.seedTrackUri);
           if (videoId) {
             const mixUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
