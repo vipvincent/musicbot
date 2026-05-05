@@ -14,7 +14,8 @@ const {
   MessageFlags,
   ModalBuilder,
   TextInputBuilder,
-  TextInputStyle
+  TextInputStyle,
+  ActivityType
 } = require('discord.js');
 const { Shoukaku, Connectors } = require('shoukaku');
 
@@ -50,7 +51,14 @@ function guildLabel(guildId) {
   const g = client?.guilds?.cache?.get(guildId);
   return g ? `[${g.name}]` : `[${guildId}]`;
 }
-// ─────────────────────────────────────────────────────────────────────────────
+// Discord 狀態更新
+function updatePresence() {
+  if (!client.user) return;
+  client.user.setPresence({
+    activities: [{ name: '/play', type: ActivityType.Listening }],
+    status: 'online'
+  });
+}
 
 const nodes = [
   {
@@ -230,7 +238,7 @@ const commandData = [
     ),
   new SlashCommandBuilder()
     .setName('search')
-    .setDescription('搜尋並播放音樂 (與 /play 相同)')
+    .setDescription('搜尋並播放音樂')
     .addStringOption((opt) =>
       opt
         .setName('song')
@@ -275,7 +283,13 @@ const commandData = [
     .setDescription('查看目前正在播放的歌曲資訊'),
   new SlashCommandBuilder()
     .setName('autorecommend')
-    .setDescription('開啟或關閉自動推薦（佇列播完後自動推薦相似歌曲）')
+    .setDescription('開啟或關閉自動推薦（佇列播完後自動推薦相似歌曲）'),
+  new SlashCommandBuilder()
+    .setName('pause')
+    .setDescription('暫停當前播放的音樂'),
+  new SlashCommandBuilder()
+    .setName('resume')
+    .setDescription('繼續播放已暫停的音樂')
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -294,6 +308,7 @@ function getState(guildId) {
       idleTimer: null,
       guild: null,
       stopping: false,
+      paused: false,
       nowPlayingMsg: null,
       _playNextRunning: false,
       autoRecommend: true,
@@ -314,6 +329,8 @@ function clearIdle(state) {
     state.idleTimer = null;
   }
 }
+
+// ────────────────────────────────────────────────────────────────────────────
 
 function startIdleTimer(state, guildId) {
   clearIdle(state);
@@ -711,6 +728,7 @@ async function _playNextInner(guildId, state) {
 
   try {
     await state.player.playTrack({ track: { encoded } });
+    state.paused = false;
     await sendNowPlaying(state, state.guild, true);
   } catch (e) {
     // playTrack 在 JS 呼叫層就失敗，Lavalink 不會送 exception 事件，必須自己排程重試
@@ -807,7 +825,7 @@ function bindPlayerEvents(player, guildId) {
     waitAndSchedule();
   });
 
-  player.on('stuck', (data) => {
+  player.on('stuck', async (data) => {
     const s = getLatestState();
     if (!s || s.stopping || !s.current) return;
 
@@ -816,23 +834,30 @@ function bindPlayerEvents(player, guildId) {
     if (currEncoded && eventEncoded && currEncoded !== eventEncoded) return;
 
     const title = s.current?.info?.title || '未知';
-    log.warn(`${guildLabel(guildId)} [player:stuck] 播放緩衝卡住："${title}"，30 秒後若無 end/exception 將強制跳過`);
+    // Lavalink 已在自己的 threshold（通常 10 秒）到了才送出 stuck 事件，
+    // 這裡不再額外等待，直接強制跳過。
+    log.warn(`${guildLabel(guildId)} [player:stuck] Lavalink 回報緩衝卡住，直接跳過："${title}"`);
 
-    const stuckTrack = s.current;
-    setTimeout(async () => {
+    s.current = null;
+    s.paused = false;
+
+    if (s.textChannelId && s.guild) {
+      try {
+        const ch = s.guild.channels.cache.get(s.textChannelId);
+        if (ch) ch.send(`⚠️ **${title}** 緩衝載入失敗，已自動跳過。`).catch(() => { });
+      } catch (_) { }
+    }
+
+    await deleteNowPlayingMsg(s);
+
+    // 等待 _playNextRunning 釋放後再排程，防止與正在執行的 playNext 競爭
+    const tryPlay = () => {
       const latest = getLatestState();
-      // 若 current 已換（代表已正常結束/跳過），不做任何處理
-      if (!latest || latest.current !== stuckTrack || latest.stopping) return;
-      log.error(`${guildLabel(guildId)} [player:stuck] 逾時 30 秒，強制跳過："${title}"`);
-      latest.current = null;
-      await deleteNowPlayingMsg(latest);
-      // 等待 _playNextRunning 釋放後再排程，防止靜默被擋
-      const tryPlay = () => {
-        if (latest._playNextRunning) { setTimeout(tryPlay, 100); return; }
-        schedulePlayNext();
-      };
-      tryPlay();
-    }, 30_000);
+      if (!latest || latest.stopping) return;
+      if (latest._playNextRunning) { setTimeout(tryPlay, 100); return; }
+      schedulePlayNext();
+    };
+    tryPlay();
   });
 
   player.on('closed', async () => {
@@ -846,13 +871,11 @@ function bindPlayerEvents(player, guildId) {
       if (!botInVoice && !hasLavalinkConnection) {
         log.warn(`${guildLabel(guildId)} [player:closed] 連線已斷開，清除狀態`);
         const cs = guildStates.get(guildId);
-        if (cs) { clearIdle(cs); try { await deleteNowPlayingMsg(cs); } catch (_) { } }
         guildStates.delete(guildId);
       }
       else if (botInVoice && !hasLavalinkConnection) {
         log.warn(`${guildLabel(guildId)} [player:closed] 幽靈連線，強制離開語音頻道`);
         const cs = guildStates.get(guildId);
-        if (cs) { clearIdle(cs); try { await deleteNowPlayingMsg(cs); } catch (_) { } }
         guildStates.delete(guildId);
         try { await shoukaku.leaveVoiceChannel(guildId); } catch (_) { }
       }
@@ -868,12 +891,13 @@ function buildNowPlayingEmbed(state, guild) {
   const author = current.info.author || '未知';
   const requester = current.autoRecommended ? '🤖 推薦歌曲' : (current.requesterId ? `<@${current.requesterId}>` : '未知');
   const channelName = guild.members.me?.voice?.channel?.toString() || '未知';
+  const statusIcon = state.paused ? '⏸️  已暫停' : '🎵  正在播放';
 
   const embed = new EmbedBuilder()
-    .setTitle('🎵  正在播放')
+    .setTitle(statusIcon)
     .setDescription(uri ? `**[${title}](${uri})**\n${author}` : `**${title}**\n${author}`)
     .addFields({ name: ' ', value: `${requester} | ${channelName}` })
-    .setColor(0x3498db);
+    .setColor(state.paused ? 0x95a5a6 : 0x3498db);
 
   if (current.info.artworkUrl) {
     embed.setThumbnail(current.info.artworkUrl);
@@ -882,13 +906,18 @@ function buildNowPlayingEmbed(state, guild) {
   return embed;
 }
 
-function buildControls(autoRecommend = true) {
+function buildControls(autoRecommend = true, paused = false) {
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('music_add')
       .setLabel('新增歌曲')
       .setEmoji('➕')
       .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(paused ? 'music_resume' : 'music_pause')
+      .setLabel(paused ? '繼續播放' : '暫停播放')
+      .setEmoji(paused ? '▶️' : '⏸️')
+      .setStyle(paused ? ButtonStyle.Success : ButtonStyle.Danger),
     new ButtonBuilder()
       .setCustomId('music_skip')
       .setLabel('下一首')
@@ -989,7 +1018,7 @@ async function sendNowPlaying(state, guild, silent) {
     try { await state.nowPlayingMsg.delete(); } catch (_) { }
     state.nowPlayingMsg = null;
   }
-  const payload = { embeds: [embed], components: buildControls(state.autoRecommend) };
+  const payload = { embeds: [embed], components: buildControls(state.autoRecommend, state.paused) };
   if (silent) payload.flags = MessageFlags.SuppressNotifications;
   const msg = await channel.send(payload);
   state.nowPlayingMsg = msg;
@@ -1171,6 +1200,7 @@ client.once(Events.ClientReady, async () => {
   await client.application.fetch();
   await registerCommands();
   log.info(`[Main] 機器人已上線，登入身份：${client.user.tag}`);
+  updatePresence(); // 設定初始狀態為 /play 提示
 
   // 機器人上線後，初始化 Lavalink 連線
   try {
@@ -1185,6 +1215,45 @@ client.once(Events.ClientReady, async () => {
     log.error('[Lavalink] 初始化節點失敗：', e?.message || e);
   }
 });
+
+// ── 偵測機器人被踢出/移出語音頻道 ──────────────────────────────────────────
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+  // 只關心機器人自己的狀態變化
+  if (newState.id !== client.user?.id) return;
+
+  const guildId = newState.guild.id;
+  const state = guildStates.get(guildId);
+  if (!state || state.stopping) return;
+
+  const wasInChannel = !!oldState.channelId;
+  const isInChannel = !!newState.channelId;
+
+  // 機器人被踢出語音頻道（有頻道 → 無頻道）
+  if (wasInChannel && !isInChannel) {
+    log.warn(`${guildLabel(guildId)} [VoiceStateUpdate] 機器人被移出語音頻道，清理狀態`);
+    state.stopping = true;
+    state.queue = [];
+    state.current = null;
+    clearIdle(state);
+    try { await deleteNowPlayingMsg(state); } catch (_) { }
+    guildStates.delete(guildId);
+    try { await shoukaku.leaveVoiceChannel(guildId); } catch (_) { }
+    return;
+  }
+
+  // 機器人被移到其他頻道（頻道 ID 改變）
+  if (wasInChannel && isInChannel && oldState.channelId !== newState.channelId) {
+    log.info(`${guildLabel(guildId)} [VoiceStateUpdate] 機器人被移至頻道 ${newState.channelId}`);
+    // 不中斷播放，Lavalink 會繼續，只更新 now-playing embed（若有）
+    if (state.nowPlayingMsg && state.current && state.guild) {
+      try {
+        const embed = buildNowPlayingEmbed(state, state.guild);
+        await state.nowPlayingMsg.edit({ embeds: [embed], components: buildControls(state.autoRecommend, state.paused) });
+      } catch (_) { }
+    }
+  }
+});
+// ────────────────────────────────────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -1304,6 +1373,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const title = state.current.info?.title || '未知歌曲';
         log.info(`${guildLabel(interaction.guildId)} [playNext] 使用者請求跳過："${title}" (by ${interaction.user.username})`);
         await interaction.reply(`⏭️ \`${interaction.user.displayName}\` 卡歌啦！已幫您跳過 **${title}**。`);
+        state.paused = false;
         // 先停止當前播放
         try { state.player.stopTrack(); } catch (_) { }
         state.current = null;
@@ -1337,20 +1407,64 @@ client.on(Events.InteractionCreate, async (interaction) => {
         log.info(`${guildLabel(interaction.guildId)} [Interaction:Command] /${interaction.commandName} 查看目前播放`);
         const embed = buildNowPlayingEmbed(state, interaction.guild);
         if (!embed) return interaction.reply({ content: '❌ 目前沒有播放任何音樂喔。', flags: MessageFlags.Ephemeral });
-        return interaction.reply({ embeds: [embed], components: buildControls(state.autoRecommend), flags: MessageFlags.Ephemeral });
+        return interaction.reply({ embeds: [embed], components: buildControls(state.autoRecommend, state.paused), flags: MessageFlags.Ephemeral });
       }
 
       if (interaction.commandName === 'autorecommend') {
         state.autoRecommend = !state.autoRecommend;
         log.info(`${guildLabel(interaction.guildId)} [guildState] 自動推薦設定改為：${state.autoRecommend ? '開啟' : '關閉'}`);
         if (state.nowPlayingMsg) {
-          try { await state.nowPlayingMsg.edit({ components: buildControls(state.autoRecommend) }); } catch (_) { }
+          try { await state.nowPlayingMsg.edit({ components: buildControls(state.autoRecommend, state.paused) }); } catch (_) { }
         }
         return interaction.reply({
           content: state.autoRecommend
             ? `🤖 \`${interaction.user.displayName}\` 開啟了自動推薦！佇列播完後將自動推薦相似歌曲～`
             : `🤖 \`${interaction.user.displayName}\` 關閉了自動推薦。`
         });
+      }
+
+      if (interaction.commandName === 'pause') {
+        if (!state.player || !state.current) {
+          return interaction.reply({ content: '❌ 現在沒有正在播放的音樂喔！' });
+        }
+        if (state.paused) {
+          return interaction.reply({ content: '❌ 音樂已經是暫停狀態了，輸入 `/resume` 或按按鈕可以繼續播放！' });
+        }
+        log.info(`${guildLabel(interaction.guildId)} [pause] 暫停播放 (by ${interaction.user.username})`);
+        try { await state.player.setPaused(true); } catch (e) {
+          log.error(`${guildLabel(interaction.guildId)} [pause] setPaused 失敗`, e);
+          return interaction.reply({ content: '❌ 暫停失敗，請稍後再試！' });
+        }
+        state.paused = true;
+        if (state.nowPlayingMsg) {
+          try {
+            const embed = buildNowPlayingEmbed(state, interaction.guild);
+            await state.nowPlayingMsg.edit({ embeds: [embed], components: buildControls(state.autoRecommend, true) });
+          } catch (_) { }
+        }
+        return interaction.reply({ content: `⏸️ \`${interaction.user.displayName}\` 把音樂暫停了！輸入 \`/resume\` 或按按鈕可以繼續喔～` });
+      }
+
+      if (interaction.commandName === 'resume') {
+        if (!state.player || !state.current) {
+          return interaction.reply({ content: '❌ 現在沒有正在播放的音樂喔！' });
+        }
+        if (!state.paused) {
+          return interaction.reply({ content: '❌ 音樂並沒有暫停喔，現在正在播放中！' });
+        }
+        log.info(`${guildLabel(interaction.guildId)} [resume] 繼續播放 (by ${interaction.user.username})`);
+        try { await state.player.setPaused(false); } catch (e) {
+          log.error(`${guildLabel(interaction.guildId)} [resume] setPaused 失敗`, e);
+          return interaction.reply({ content: '❌ 繼續播放失敗，請稍後再試！' });
+        }
+        state.paused = false;
+        if (state.nowPlayingMsg) {
+          try {
+            const embed = buildNowPlayingEmbed(state, interaction.guild);
+            await state.nowPlayingMsg.edit({ embeds: [embed], components: buildControls(state.autoRecommend, false) });
+          } catch (_) { }
+        }
+        return interaction.reply({ content: `▶️ \`${interaction.user.displayName}\` 讓音樂繼續播放囉！` });
       }
 
       if (interaction.commandName === 'queue' || interaction.commandName === 'playlist') {
@@ -1400,6 +1514,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
+      if (interaction.customId === 'music_pause') {
+        if (!state.player || !state.current) {
+          return interaction.reply({ content: '❌ 現在沒有正在播放的音樂喔！' });
+        }
+        if (state.paused) {
+          return interaction.reply({ content: '❌ 音樂已經是暫停狀態了！' });
+        }
+        log.info(`${guildLabel(interaction.guildId)} [pause] 暫停播放 (by ${interaction.user.username})`);
+        try { await state.player.setPaused(true); } catch (e) {
+          log.error(`${guildLabel(interaction.guildId)} [pause] setPaused 失敗`, e);
+          return interaction.reply({ content: '❌ 暫停失敗，請稍後再試！' });
+        }
+        state.paused = true;
+        if (state.nowPlayingMsg) {
+          try {
+            const embed = buildNowPlayingEmbed(state, interaction.guild);
+            await state.nowPlayingMsg.edit({ embeds: [embed], components: buildControls(state.autoRecommend, true) });
+          } catch (_) { }
+        }
+        return interaction.reply({ content: `⏸️ \`${interaction.user.displayName}\` 把音樂暫停了！` });
+      }
+
+      if (interaction.customId === 'music_resume') {
+        if (!state.player || !state.current) {
+          return interaction.reply({ content: '❌ 現在沒有正在播放的音樂喔！' });
+        }
+        if (!state.paused) {
+          return interaction.reply({ content: '❌ 音樂並沒有暫停喔！' });
+        }
+        log.info(`${guildLabel(interaction.guildId)} [resume] 繼續播放 (by ${interaction.user.username})`);
+        try { await state.player.setPaused(false); } catch (e) {
+          log.error(`${guildLabel(interaction.guildId)} [resume] setPaused 失敗`, e);
+          return interaction.reply({ content: '❌ 繼續播放失敗，請稍後再試！' });
+        }
+        state.paused = false;
+        if (state.nowPlayingMsg) {
+          try {
+            const embed = buildNowPlayingEmbed(state, interaction.guild);
+            await state.nowPlayingMsg.edit({ embeds: [embed], components: buildControls(state.autoRecommend, false) });
+          } catch (_) { }
+        }
+        return interaction.reply({ content: `▶️ \`${interaction.user.displayName}\` 讓音樂繼續播放囉！` });
+      }
+
       if (interaction.customId === 'music_skip') {
         if (!state.player || !state.current) {
           return interaction.reply({ content: '❌ 現在很安靜唷，沒有音樂可以跳過啦！' });
@@ -1407,6 +1565,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const title = state.current.info?.title || '未知歌曲';
         log.info(`${guildLabel(interaction.guildId)} [playNext] 跳過："${title}" (by ${interaction.user.username})`);
         await interaction.reply({ content: `⏭️ \`${interaction.user.displayName}\` 卡歌啦！已幫您跳過 **${title}**。` });
+        state.paused = false;
         // 先停止當前播放
         try { state.player.stopTrack(); } catch (_) { }
         state.current = null;
@@ -1431,7 +1590,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         state.autoRecommend = !state.autoRecommend;
         log.info(`${guildLabel(interaction.guildId)} [autoRecommend] 切換自動推薦：${state.autoRecommend ? '開啟' : '關閉'} (by ${interaction.user.username})`);
         if (state.nowPlayingMsg) {
-          try { await state.nowPlayingMsg.edit({ components: buildControls(state.autoRecommend) }); } catch (_) { }
+          try { await state.nowPlayingMsg.edit({ components: buildControls(state.autoRecommend, state.paused) }); } catch (_) { }
         }
         return interaction.reply({
           content: state.autoRecommend
