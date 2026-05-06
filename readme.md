@@ -6,6 +6,7 @@
 
 - YouTube 搜尋與播放
 - YouTube 播放清單
+- Bilibili
 - Queue 分頁
 - Now Playing 面板
 - 按鈕控制（下一首 / 清空 / 離開）
@@ -51,6 +52,7 @@
 需要以下Lavalink插件：
     - youtube_source
     - lavasrc
+    - lavabili
 
 可透過專案根目錄下的‵application.yml‵來套lavalink設定
 

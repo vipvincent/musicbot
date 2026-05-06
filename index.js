@@ -137,7 +137,8 @@ function attachNodeDisconnectHandler(nodeName) {
 const _origAddNode = shoukaku.addNode.bind(shoukaku);
 shoukaku.addNode = function (options) {
   _origAddNode(options);
-  // 重連迴圈期間不重複掛 listener（由 startReconnectLoop 統一管理）
+  // 重連迴圈期間不在此掛 listener（由 ready 事件統一重掛，避免重複）
+  // 首次啟動（非重連迴圈）時掛上 listener
   if (!_reconnectTimer) {
     setImmediate(() => attachNodeDisconnectHandler(options.name));
   }
@@ -1683,6 +1684,9 @@ shoukaku.on('ready', async (name) => {
   lavalinkEverReady = true;
   stopReconnectLoop();
   log.info(`[Lavalink] 節點已就緒`);
+
+  // 每次節點就緒（含重連後）都重新掛 disconnect listener，確保下次斷線仍能觸發重連
+  setImmediate(() => attachNodeDisconnectHandler(name));
 
   if (isReconnecting) {
     isReconnecting = false;

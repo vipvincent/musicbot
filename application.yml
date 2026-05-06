@@ -23,6 +23,7 @@ plugins:
       url: "https://cipher.kikkia.dev/" # 遠端密鑰伺服器的基本 URL。
       password: "your_secret_password" # 用於向遠端密鑰伺服器進行身份驗證的密碼。
       userAgent: "your_service_name" # 可選的 user-agent 標頭，用於後端指標。
+
   lavasrc:
     providers: # 用於載入曲目的自訂提供者。這是預設設定
       # - "dzisrc:%ISRC%" # Deezer ISRC 提供者
@@ -128,16 +129,33 @@ plugins:
 #        url: "https://example.org" # 要使用的 HTTP 代理
 #        username: "my-bot" # 用於代理驗證的使用者名稱（可選）
 #        password: "youshallpass" # 用於代理驗證的密碼（可選）
+  lavabili:
+    enabled: true
+    allowSearch: true      # 是否可以使用“bilisearch:”
+    playlistPageCount: -1  # -1 表示無限制，或可設定具體數字。
+    auth:
+      enabled: false # 將“enabled: true”設定為使身份驗證正常工作的最低要求。
+      # 登入嗶哩嗶哩後，開啟開發者工具並擷取 cookie 資訊。
+      sessdata: "paste your sessdata here if applicable"
+      biliJct: "paste your biliJct here if applicable"
+      dedeUserId: "paste your dedeUserId here if applicable"
+      buvid3: "paste your buvid3 here if applicable"
+      buvid4: "paste your buvid4 here if applicable"
+      acTimeValue: "paste your buvid4 here if applicable" # 用於登入狀態過期後刷新 cookie。如果沒有此值，您將只能重新登入。如果您不需要刷新憑證，則無需提供此值。
 
 lavalink:
   plugins:
     # youtube source
-    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.0"
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
       snapshot: false # Set to true if you want to use a snapshot version.
     # lavasrc
     - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.1"
       repository: "https://maven.lavalink.dev/releases" # this is optional for lavalink v4.0.0-beta.5 or greater
       snapshot: false # set to true if you want to use snapshot builds (see below)
+    # lavabili
+    - dependency: "com.github.ParrotXray:lavabili-plugin:1.3.1"
+      repository: "https://jitpack.io"
+      snapshot: false
 
 #   # example
 #    - dependency: "com.github.example:example-plugin:1.0.0" # 必填，插件的座標
