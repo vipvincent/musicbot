@@ -1,9 +1,10 @@
 services:
-  dcmusicbot:
-    image: ghcr.io/vipvincent/dcmusicbot:latest
-    container_name: dcmusicbot
+  musicbot:
+    image: ghcr.io/vipvincent/musicbot:latest
+    container_name: musicbot
     restart: unless-stopped
     environment:
+      # 請透過外置環鏡變數設定 DISCORD_BOT_TOKEN，建議不要在此直接設定
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - LAVALINK_HOST=lavalink
       - LAVALINK_PORT=2333
@@ -19,9 +20,11 @@ services:
     container_name: lavalink
     restart: unless-stopped
     environment:
-      - _JAVA_OPTIONS=-Xmx512M
+      # 請在此處設定Java的參數，例如記憶體限制
+      - _JAVA_OPTIONS= -Xms512M -Xmx1G
       - LAVALINK_SERVER_PASSWORD=${LAVALINK_PASSWORD:-youshallnotpass}
     volumes:
+      # 此處為Lavalink的配置文件和插件目錄，請修改到對應的路徑
       - ./application.yml:/opt/Lavalink/application.yml
       - ./plugins/:/opt/Lavalink/plugins/
     networks:
@@ -30,6 +33,7 @@ services:
       - 2333
     ports:
       - "2333:2333"
+      
 networks:
   lavalink:
     name: lavalink

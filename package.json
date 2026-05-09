@@ -1,14 +1,14 @@
 {
-  "name": "dcmusicbot",
+  "name": "musicbot",
   "version": "1.0.0",
   "description": "Discord music bot use Lavalink",
-  "homepage": "https://github.com/vipvincent/dcmusicbot#readme",
+  "homepage": "https://github.com/vipvincent/musicbot#readme",
   "bugs": {
-    "url": "https://github.com/vipvincent/dcmusicbot/issues"
+    "url": "https://github.com/vipvincent/musicbot/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vipvincent/dcmusicbot.git"
+    "url": "git+https://github.com/vipvincent/musicbot.git"
   },
   "license": "ARR",
   "author": "vipvincent",

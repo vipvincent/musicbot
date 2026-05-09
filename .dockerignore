@@ -29,3 +29,9 @@ docker-compose.example.yml
 # Documentation
 readme.md
 LICENSE
+
+# Lavalink
+application.yml
+
+# Batch file 
+start.bat
