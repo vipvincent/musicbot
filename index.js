@@ -31,7 +31,6 @@ const lavalinkPort = process.env.LAVALINK_PORT || '2333';
 const lavalinkPassword = process.env.LAVALINK_PASSWORD || 'youshallnotpass';
 const lavalinkSecure = (process.env.LAVALINK_SECURE || 'false').toLowerCase() === 'true';
 
-// ─── Logger ──────────────────────────────────────────────────────────────────
 function getLocalISOString() {
   const now = new Date();
   const offset = -now.getTimezoneOffset();
@@ -51,7 +50,6 @@ function guildLabel(guildId) {
   const g = client?.guilds?.cache?.get(guildId);
   return g ? `[${g.name}]` : `[${guildId}]`;
 }
-// Discord 狀態更新
 function updatePresence() {
   if (!client.user) return;
   client.user.setPresence({
@@ -60,21 +58,10 @@ function updatePresence() {
   });
 }
 
-const nodes = [
-  {
-    name: 'default',
-    url: `${lavalinkHost}:${lavalinkPort}`,
-    auth: lavalinkPassword,
-    secure: lavalinkSecure
-  }
-];
-
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates]
 });
 
-// reconnectTries: 1 最低值，讓 disconnect 事件能正常觸發，其餘由我們的重連迴圈接手
-// reconnectInterval 單位為「秒」
 const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), [], {
   resume: true,
   resumeTimeout: 30,
@@ -82,13 +69,10 @@ const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), [], {
   reconnectInterval: 0
 });
 
-// ── 單一全域重連迴圈 ──────────────────────────────────────────────────────────
-// 用一個 setInterval 取代「每次 addNode 都掛 disconnect listener」的設計，
-// 避免多次 addNode 導致 listener 累積、ready 事件重複觸發。
 let _reconnectTimer = null;
 
 function startReconnectLoop(nodeName) {
-  if (_reconnectTimer) return;   // 防止重複啟動
+  if (_reconnectTimer) return;
   isReconnecting = true;
   isWaitingReconnect = true;
   log.warn(`[Lavalink] 節點斷線，開始每 5 秒重試`);
@@ -98,7 +82,6 @@ function startReconnectLoop(nodeName) {
       stopReconnectLoop();
       return;
     }
-    // 先移除可能殘留的舊節點，避免積累
     try { shoukaku.nodes.delete(nodeName); } catch (_) { }
     log.info(`[Lavalink] 重試連接節點`);
     try {
@@ -121,7 +104,6 @@ function stopReconnectLoop() {
   isWaitingReconnect = false;
 }
 
-// 監聽節點斷線，啟動重連迴圈（只掛一次）
 function attachNodeDisconnectHandler(nodeName) {
   const node = shoukaku.nodes.get(nodeName);
   if (!node) return;
@@ -137,32 +119,27 @@ function attachNodeDisconnectHandler(nodeName) {
 const _origAddNode = shoukaku.addNode.bind(shoukaku);
 shoukaku.addNode = function (options) {
   _origAddNode(options);
-  // 重連迴圈期間不在此掛 listener（由 ready 事件統一重掛，避免重複）
-  // 首次啟動（非重連迴圈）時掛上 listener
   if (!_reconnectTimer) {
     setImmediate(() => attachNodeDisconnectHandler(options.name));
   }
 };
 
 let isReconnecting = false;
-let isWaitingReconnect = false;  // 已排程重連，避免重複印 log
+let isWaitingReconnect = false;
 
 const guildStates = new Map();
 const pendingPlayChoices = new Map();
-// key 格式：`${userId}:${guildId}`，避免同一使用者在不同 guild 互相覆蓋
 let lavalinkReady = false;
-let lavalinkEverReady = false;  // 是否曾經成功連線過
+let lavalinkEverReady = false;
 const NODE_STATE_CONNECTED = 1;
 
-/** 將所有 guild 播放狀態暫停並通知文字頻道 */
 async function pauseAllGuilds() {
   for (const [guildId, state] of guildStates.entries()) {
     try {
-      if (state.stopping) continue;   // 冪等防護：已暫停過就跳過，避免重複呼叫蓋掉 _pendingResume
+      if (state.stopping) continue;
       clearIdle(state);
-      // 標記為需要重連後繼續播放
       state._pendingResume = !!(state.current);
-      state.stopping = true;          // 停止觸發 end 事件的自動播下一首
+      state.stopping = true;
       if (state.player) {
         try { state.player.stopTrack(); } catch (_) { }
       }
@@ -170,7 +147,6 @@ async function pauseAllGuilds() {
   }
 }
 
-/** 重連成功後恢復各 guild 播放 */
 async function resumeAllGuilds() {
   for (const [guildId, state] of guildStates.entries()) {
     try {
@@ -178,7 +154,6 @@ async function resumeAllGuilds() {
       state._pendingResume = false;
       state.stopping = false;
 
-      // 重新加入語音頻道
       const channelId = state.player?.connection?.channelId
         || state.guild?.members?.me?.voice?.channelId;
       if (!channelId || !state.guild) continue;
@@ -186,7 +161,6 @@ async function resumeAllGuilds() {
       log.info(`${guildLabel(guildId)} [resumeAllGuilds] 嘗試恢復播放，重新加入語音頻道 ${channelId}`);
       let player;
       try {
-        // 先嘗試離開舊連線
         try { await shoukaku.leaveVoiceChannel(guildId); } catch (_) { }
         player = await shoukaku.joinVoiceChannel({
           guildId,
@@ -199,7 +173,6 @@ async function resumeAllGuilds() {
         continue;
       }
 
-      // 移除舊 player 的監聽器，防止孤兒 listener 操作過時的 state
       if (state.player) {
         try { state.player.removeAllListeners(); } catch (_) { }
         state.player._listenersAttached = false;
@@ -207,13 +180,11 @@ async function resumeAllGuilds() {
       state.player = player;
       state.player._listenersAttached = false;
 
-      // 將 current 放回 queue 最前端重新播放
       if (state.current) {
         state.queue.unshift(state.current);
         state.current = null;
       }
 
-      // 重連後重置重入旗標，避免殘留的 true 擋住 playNext
       state._playNextRunning = false;
 
       await playNext(guildId);
@@ -317,8 +288,8 @@ function getState(guildId) {
       lastPlayedUri: null,
       seedTrackTitle: null,
       seedTrackUri: null,
-      recommendCache: [], // 存放種子歌曲產生的推薦清單 (快取)
-      history: [] // 紀錄最近播放過的歌曲，避免重複推薦
+      recommendCache: [],
+      history: []
     });
   }
   return guildStates.get(guildId);
@@ -331,21 +302,16 @@ function clearIdle(state) {
   }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-
 function startIdleTimer(state, guildId) {
   clearIdle(state);
   state.idleTimer = setTimeout(async () => {
-    // 若 state 已被刪除（例如 /stop 後），直接忽略
     if (!guildStates.has(guildId)) return;
     state.idleTimer = null;
     log.info(`${guildLabel(guildId)} [idleTimer] 閒置逾時（30 分鐘），自動離開語音頻道`);
     state.stopping = true;
     state.queue = [];
     state.current = null;
-    // 刪除正在播放訊息
     try { await deleteNowPlayingMsg(state); } catch (_) { }
-    // 發送通知訊息
     if (state.textChannelId && state.guild) {
       try {
         const channel = state.guild.channels.cache.get(state.textChannelId);
@@ -356,7 +322,6 @@ function startIdleTimer(state, guildId) {
         log.warn(`${guildLabel(guildId)} [idleTimer] 發送通知訊息失敗`, e);
       }
     }
-    // 離開語音頻道（獨立 try/catch，確保上面任何失敗都不影響離開動作）
     try {
       if (state.player) await state.player.destroy();
     } catch (_) { }
@@ -409,7 +374,7 @@ async function joinVoice(interaction) {
   state.player._listenersAttached = false;
   state.textChannelId = interaction.channelId;
   state.guild = interaction.guild;
-  clearIdle(state);  // 清除可能殘留的 idle timer（例如 /stop 後再 /play）
+  clearIdle(state);
 
   return { ok: true, player, voice };
 }
@@ -429,10 +394,8 @@ async function ensureVoice(interaction) {
       || interaction.guild.members.me?.voice?.channelId
       || null;
     if (!existingChannelId || existingChannelId === voice.channelId) {
-      // 更新文字頻道，確保 now playing 訊息發到使用者所在的頻道
       state.textChannelId = interaction.channelId;
       state.guild = interaction.guild;
-      // 確保 stopping 被清除，這樣即使之前進入閒置或暫停狀態，新的播放也能順利開始
       state.stopping = false;
       return { ok: true, message: null };
     }
@@ -443,7 +406,6 @@ async function ensureVoice(interaction) {
   const result = await joinVoice(interaction);
   if (!result.ok) return result;
 
-  // 確保 stopping 旗標被清除（例如舊連線殘留的狀態）
   getState(interaction.guildId).stopping = false;
 
   return { ok: true, message: joinedMessage(interaction.user.displayName, voice.channel) };
@@ -534,14 +496,9 @@ async function resolveTracks(query, mode = 'auto') {
   return { type: 'empty', tracks: [] };
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function playNext(guildId) {
   const state = getState(guildId);
   if (!state.player || state.stopping) return;
-  // 防止重入：若已有一次 playNext 正在執行中，直接忽略
   if (state._playNextRunning) return;
   state._playNextRunning = true;
   let scheduleRetry = false;
@@ -549,21 +506,16 @@ async function playNext(guildId) {
     scheduleRetry = await _playNextInner(guildId, state);
   } finally {
     state._playNextRunning = false;
-    // _playNextInner 回傳 true 代表播放失敗需要重試下一首
-    // 必須在 _playNextRunning 清除後才能重新觸發，否則 guard 會擋住
     if (scheduleRetry) setImmediate(() => playNext(guildId));
   }
 }
 
-// 回傳 true 表示需要排程重試（呼叫方負責在 _playNextRunning=false 後執行）
 async function _playNextInner(guildId, state) {
   if (state.queue.length === 0) {
     state.current = null;
-    // 佇列清空時刪除「正在播放」訊息
     try { await deleteNowPlayingMsg(state); } catch (_) { }
 
-    // ── 自動推薦：佇列播完後，若已開啟則搜尋相似歌曲 ──────────────────────────
-    if (state.autoRecommend && state.seedTrackTitle) {
+    if (state.autoRecommend && (state.seedTrackTitle || state.seedTrackUri)) {
       try {
         const normalizeTitle = (t) => (t || '')
           .toLowerCase()
@@ -587,9 +539,7 @@ async function _playNextInner(guildId, state) {
             ttitle === seedNorm;
         };
 
-        // 如果快取裡沒歌了，才去取得新的 Mix
         if (state.recommendCache.length === 0) {
-          // 種子輪換
           const lastHistory = state.history[state.history.length - 1];
           if (lastHistory?.uri && lastHistory.uri !== state.seedTrackUri) {
             const { videoId: lastVideoId } = parseYoutubeUrl(lastHistory.uri);
@@ -600,16 +550,26 @@ async function _playNextInner(guildId, state) {
             }
           }
 
-          const { videoId } = parseYoutubeUrl(state.seedTrackUri);
+          const node = shoukaku.getIdealNode();
+          let { videoId } = parseYoutubeUrl(state.seedTrackUri);
+
+          const searchTerm = state.seedTrackTitle || state.seedTrackUri;
+          if (!videoId && searchTerm) {
+            try {
+              const searchResult = await node.rest.resolve(`ytsearch:${searchTerm}`);
+              const found = (searchResult?.loadType === 'search' ? searchResult.data : null)?.[0];
+              if (found) videoId = parseYoutubeUrl(found.info?.uri).videoId || null;
+            } catch (_) { }
+          }
+
           if (videoId) {
             const mixUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
-            const node = shoukaku.getIdealNode();
             let mixResult = null;
             try { mixResult = await node.rest.resolve(mixUrl); } catch (_) { }
 
             if (mixResult?.loadType === 'playlist' && mixResult.data?.tracks?.length > 1) {
               state.recommendCache = mixResult.data.tracks
-                .slice(1) // 跳過種子原曲
+                .slice(1)
                 .filter(t => !isDuplicate(t))
                 .map(t => ({
                   encoded: t?.encoded || t?.track || null,
@@ -625,7 +585,6 @@ async function _playNextInner(guildId, state) {
           }
         }
 
-        // 從快取中取出下一首，取出時再次檢查是否重複 (防範快取期間手動點了重複的歌)
         let foundItem = null;
         while (state.recommendCache.length > 0) {
           const candidate = state.recommendCache.shift();
@@ -638,16 +597,13 @@ async function _playNextInner(guildId, state) {
         if (foundItem) {
           state.queue.push(foundItem);
         } else if (state.recommendCache.length === 0) {
-          // 如果快取清空後仍找不到適合的歌，下一首會再次觸發重新抓取
           log.info(`${guildLabel(guildId)} [autoRecommend] 快取候選曲目均已撥放或重複`);
         }
       } catch (e) {
         log.warn(`${guildLabel(guildId)} [autoRecommend] 推薦過程發生錯誤`, e);
       }
     }
-    // ─────────────────────────────────────────────────────────────────────────
 
-    // 若推薦成功加入佇列，直接繼續播放（跳過 idle）；否則才進入 idle
     if (state.queue.length === 0) {
       startIdleTimer(state, guildId);
       if (state.textChannelId && state.guild) {
@@ -675,16 +631,13 @@ async function _playNextInner(guildId, state) {
       }
       return false;
     }
-    // 佇列有推薦歌曲，往下繼續播放
   }
 
   clearIdle(state);
   const item = state.queue.shift();
   state.current = item;
-  // 紀錄歷史與最後播放資訊
   if (item?.info?.title) {
     state.lastPlayedTitle = item.info.title;
-    // 更新歷史紀錄 (保持最近 20 首)
     state.history.push({
       title: item.info.title,
       id: item.info.identifier,
@@ -694,7 +647,6 @@ async function _playNextInner(guildId, state) {
   }
   if (item?.info?.uri) state.lastPlayedUri = item.info.uri;
 
-  // 如果這首歌不是自動推薦的，就將它設為「種子歌曲」，並清空先前的推薦快取
   if (!item.autoRecommended) {
     state.seedTrackTitle = item.info?.title || null;
     state.seedTrackUri = item.info?.uri || null;
@@ -709,18 +661,16 @@ async function _playNextInner(guildId, state) {
     log.warn(`${guildLabel(guildId)} [playNext] 連線尚未就緒（state=${connection.state}），等待最多 3 秒`);
     const start = Date.now();
     while (Date.now() - start < 3000 && !isConnected()) {
-      await sleep(250);
+      await new Promise(r => setTimeout(r, 250));
     }
   }
 
-  // 必須在 playTrack 之前掛上 listener
   if (!state.player._listenersAttached) {
     bindPlayerEvents(state.player, guildId);
   }
 
   const encoded = item?.encoded || item?.track?.encoded || item?.track?.track;
   if (!encoded) {
-    // encoded 不存在，Lavalink 不會送任何事件，必須自己排程重試
     log.error(`${guildLabel(guildId)} [playNext] 播放 "${title}" 失敗：Missing encoded track`);
     await editOrSendError(state, '❌ 嗚嗚，我拿不到這首歌的播放資訊耶，暫時沒辦法播放給你聽喔！');
     state.current = null;
@@ -732,13 +682,11 @@ async function _playNextInner(guildId, state) {
     state.paused = false;
     await sendNowPlaying(state, state.guild, true);
   } catch (e) {
-    // playTrack 在 JS 呼叫層就失敗，Lavalink 不會送 exception 事件，必須自己排程重試
     log.error(`${guildLabel(guildId)} [playNext] playTrack 呼叫失敗："${title}"`, e);
     await editOrSendError(state, '❌ 嗚嗚，我拿不到這首歌的播放資訊耶，暫時沒辦法播放給你聽喔！');
     state.current = null;
     return true;
   }
-  // playTrack 成功送出，後續由 Lavalink exception / end 事件負責
   return false;
 }
 
@@ -747,7 +695,6 @@ function bindPlayerEvents(player, guildId) {
   player._listenersAttached = true;
 
   const getLatestState = () => guildStates.get(guildId);
-  // 跨事件共用的旗標：防止 exception + end 同時驅動兩次 playNext
   let playNextScheduled = false;
 
   const schedulePlayNext = () => {
@@ -760,14 +707,13 @@ function bindPlayerEvents(player, guildId) {
   };
 
   const getCurrentEncoded = (s) => s?.current?.encoded || s?.current?.track?.encoded || s?.current?.track?.track;
+  const getEventEncoded = (data) => data?.track?.encoded || data?.track?.track || null;
 
   player.on('end', async (data) => {
     const s = getLatestState();
     if (!s || data.reason === 'replaced' || data.reason === 'stopped' || s.stopping) return;
-    if (!s.current) return;  // current 已被清空代表已經跳過
+    if (!s.current) return;
 
-    // 【防錯機制】只在非正常結束時才比對 encoded，防範前一首失敗歌曲殘留的 end 事件
-    // 正常播完（finished）不做比對：encoded 編碼路徑可能因 Lavalink 版本而異，比對失敗會誤擋自動切歌
     if (data.reason !== 'finished') {
       const eventEncoded = getEventEncoded(data);
       const currEncoded = getCurrentEncoded(s);
@@ -778,7 +724,6 @@ function bindPlayerEvents(player, guildId) {
 
     const title = s.current?.info?.title || '未知';
 
-    // 若有未捕獲的例外導致直接以 end 失敗結束，在此補報錯
     if (data.reason === 'loadFailed' || data.reason === 'cleanup') {
       log.error(`${guildLabel(guildId)} [player:end] 播放失敗（${data.reason}）："${title}"`);
       if (s.textChannelId && s.guild) {
@@ -789,7 +734,7 @@ function bindPlayerEvents(player, guildId) {
       }
     }
 
-    s.current = null;        // 先清空，防止後續重複的 end 再次進入
+    s.current = null;
     await deleteNowPlayingMsg(s);
     schedulePlayNext();
   });
@@ -815,8 +760,6 @@ function bindPlayerEvents(player, guildId) {
 
     await deleteNowPlayingMsg(s);
 
-    // exception 代表 playTrack 成功送出（JS 層無例外），但 Lavalink 端播放失敗
-    // 需等 _playNextRunning 釋放後再排程，確保不與 playNext 的 finally 競爭。
     const waitAndSchedule = () => {
       const latest = getLatestState();
       if (!latest || latest.stopping) return;
@@ -835,8 +778,6 @@ function bindPlayerEvents(player, guildId) {
     if (currEncoded && eventEncoded && currEncoded !== eventEncoded) return;
 
     const title = s.current?.info?.title || '未知';
-    // Lavalink 已在自己的 threshold（通常 10 秒）到了才送出 stuck 事件，
-    // 這裡不再額外等待，直接強制跳過。
     log.warn(`${guildLabel(guildId)} [player:stuck] Lavalink 回報緩衝卡住，直接跳過："${title}"`);
 
     s.current = null;
@@ -851,7 +792,6 @@ function bindPlayerEvents(player, guildId) {
 
     await deleteNowPlayingMsg(s);
 
-    // 等待 _playNextRunning 釋放後再排程，防止與正在執行的 playNext 競爭
     const tryPlay = () => {
       const latest = getLatestState();
       if (!latest || latest.stopping) return;
@@ -871,12 +811,9 @@ function bindPlayerEvents(player, guildId) {
 
       if (!botInVoice && !hasLavalinkConnection) {
         log.warn(`${guildLabel(guildId)} [player:closed] 連線已斷開，清除狀態`);
-        const cs = guildStates.get(guildId);
         guildStates.delete(guildId);
-      }
-      else if (botInVoice && !hasLavalinkConnection) {
+      } else if (botInVoice && !hasLavalinkConnection) {
         log.warn(`${guildLabel(guildId)} [player:closed] 幽靈連線，強制離開語音頻道`);
-        const cs = guildStates.get(guildId);
         guildStates.delete(guildId);
         try { await shoukaku.leaveVoiceChannel(guildId); } catch (_) { }
       }
@@ -1067,6 +1004,10 @@ async function handlePlay(interaction) {
 async function handlePlayRequest(interaction, query, state, searchMessage) {
   const guildId = interaction.guildId;
   const userName = interaction.user.displayName || interaction.user.username;
+
+  const urlMatch = query.match(/https?:\/\/[^\s）)】\]>'"]+/i);
+  if (urlMatch) query = urlMatch[0];
+
   log.info(`${guildLabel(guildId)} [handlePlayRequest] 開始處理查詢："${query}" (by ${userName})`);
 
   const { videoId, listId } = parseYoutubeUrl(query);
@@ -1161,8 +1102,6 @@ async function finalizePlay({ interaction, state, resolved, query, searchMessage
     return reply(`❌ 搜尋時發生錯誤，請稍後再試看看！`);
   }
 
-  // wasIdle：佇列空且沒有正在播放的曲目，才需要主動觸發 playNext
-  // 同時排除 _playNextRunning 的情況，避免兩個 playNext 並行跑
   const wasIdle = !state.current && state.queue.length === 0 && !state._playNextRunning;
   const added = [];
   for (const track of resolved.tracks) {
@@ -1201,9 +1140,8 @@ client.once(Events.ClientReady, async () => {
   await client.application.fetch();
   await registerCommands();
   log.info(`[Main] 機器人已上線，登入身份：${client.user.tag}`);
-  updatePresence(); // 設定初始狀態為 /play 提示
+  updatePresence();
 
-  // 機器人上線後，初始化 Lavalink 連線
   try {
     shoukaku.addNode({
       name: 'default',
@@ -1217,9 +1155,7 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-// ── 偵測機器人被踢出/移出語音頻道 ──────────────────────────────────────────
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
-  // 只關心機器人自己的狀態變化
   if (newState.id !== client.user?.id) return;
 
   const guildId = newState.guild.id;
@@ -1229,7 +1165,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   const wasInChannel = !!oldState.channelId;
   const isInChannel = !!newState.channelId;
 
-  // 機器人被踢出語音頻道（有頻道 → 無頻道）
   if (wasInChannel && !isInChannel) {
     log.warn(`${guildLabel(guildId)} [VoiceStateUpdate] 機器人被移出語音頻道，清理狀態`);
     state.stopping = true;
@@ -1242,10 +1177,8 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     return;
   }
 
-  // 機器人被移到其他頻道（頻道 ID 改變）
   if (wasInChannel && isInChannel && oldState.channelId !== newState.channelId) {
     log.info(`${guildLabel(guildId)} [VoiceStateUpdate] 機器人被移至頻道 ${newState.channelId}`);
-    // 不中斷播放，Lavalink 會繼續，只更新 now-playing embed（若有）
     if (state.nowPlayingMsg && state.current && state.guild) {
       try {
         const embed = buildNowPlayingEmbed(state, state.guild);
@@ -1254,7 +1187,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     }
   }
 });
-// ────────────────────────────────────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -1305,18 +1237,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (hasConnection && existingChannelId) {
           try {
-            // 移動頻道時不設 stopping=true，避免 end 事件忽略 playNext
-            // 僅暫時忽略玩家事件（Lavalink 繼續播放，不中斷）
             log.info(`${guildLabel(interaction.guildId)} [Interaction:Command] /join 從 ${existingChannelId} 移動至 ${voice.channelId} (by ${interaction.user.username})`);
 
-            // 記住舊頻道資訊，移動前先處理
             const oldTextChannelId = state.textChannelId;
             const oldTextChannel = oldTextChannelId ? interaction.guild.channels.cache.get(oldTextChannelId) : null;
 
-            // 刪除舊頻道的正在播放訊息
             await deleteNowPlayingMsg(state);
 
-            // 在舊頻道送出「被拉走」通知（只在不同頻道時才送）
             if (oldTextChannel && oldTextChannelId !== interaction.channelId) {
               const newChannelMention = `<#${interaction.channelId}>`;
               await oldTextChannel.send(
@@ -1324,7 +1251,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
               ).catch(() => { });
             }
 
-            // 直接透過 Discord gateway 移動頻道，不重建 player，Lavalink 繼續播放
             interaction.guild.shard.send({
               op: 4,
               d: {
@@ -1334,7 +1260,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 self_deaf: true
               }
             });
-            await sleep(500);
+            await new Promise(r => setTimeout(r, 500));
             state.textChannelId = interaction.channelId;
             state.guild = interaction.guild;
             await interaction.reply({
@@ -1375,7 +1301,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         log.info(`${guildLabel(interaction.guildId)} [playNext] 使用者請求跳過："${title}" (by ${interaction.user.username})`);
         await interaction.reply(`⏭️ \`${interaction.user.displayName}\` 卡歌啦！已幫您跳過 **${title}**。`);
         state.paused = false;
-        // 先停止當前播放
         try { state.player.stopTrack(); } catch (_) { }
         state.current = null;
         await deleteNowPlayingMsg(state);
@@ -1495,7 +1420,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         clearTimeout(pending.timeoutId);
         pendingPlayChoices.delete(pendingKey);
 
-        // 確保 state.guild 有值（按鈕互動不會走 slash command 的 state.guild 賦值路徑）
         if (!state.guild) state.guild = interaction.guild;
 
         await interaction.update({ content: '📥 正在加入歌曲中...', components: [] });
@@ -1567,7 +1491,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         log.info(`${guildLabel(interaction.guildId)} [playNext] 跳過："${title}" (by ${interaction.user.username})`);
         await interaction.reply({ content: `⏭️ \`${interaction.user.displayName}\` 卡歌啦！已幫您跳過 **${title}**。` });
         state.paused = false;
-        // 先停止當前播放
         try { state.player.stopTrack(); } catch (_) { }
         state.current = null;
         await deleteNowPlayingMsg(state);
@@ -1623,7 +1546,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const songInput = new TextInputBuilder()
           .setCustomId('song_query')
           .setLabel('歌曲網址或關鍵字')
-          .setPlaceholder('在此貼上 YouTube 連結或輸入關鍵字...')
+          .setPlaceholder('在此貼上連結或輸入關鍵字...')
           .setStyle(TextInputStyle.Short)
           .setRequired(true);
 
@@ -1673,19 +1596,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 shoukaku.on('error', (name, error) => {
-  // 重連迴圈期間靜默（由 startReconnectLoop 統一處理重試）
   if (isReconnecting || isWaitingReconnect) return;
   log.error(`[Lavalink] 節點發生錯誤：`, error?.message || error);
 });
 
 shoukaku.on('ready', async (name) => {
-  if (lavalinkReady) return;   // 防止重複觸發（多個殘留連線同時就緒）
+  if (lavalinkReady) return;
   lavalinkReady = true;
   lavalinkEverReady = true;
   stopReconnectLoop();
   log.info(`[Lavalink] 節點已就緒`);
 
-  // 每次節點就緒（含重連後）都重新掛 disconnect listener，確保下次斷線仍能觸發重連
   setImmediate(() => attachNodeDisconnectHandler(name));
 
   if (isReconnecting) {
@@ -1697,7 +1618,6 @@ shoukaku.on('ready', async (name) => {
 
 shoukaku.on('reconnecting', (name) => {
   lavalinkReady = false;
-  // 啟動時從未就緒過，不算「斷線」，靜默即可
   if (!isReconnecting && lavalinkEverReady) {
     isReconnecting = true;
     pauseAllGuilds().catch(() => { });
@@ -1714,19 +1634,12 @@ log.info(`[Main] 程式啟動`);
 process.on('SIGINT', () => { log.info(`[Main] 程式停止`); process.exit(0); });
 process.on('SIGTERM', () => { log.info(`[Main] 程式停止`); process.exit(0); });
 
-// 捕獲所有未處理的 Promise rejection（防禦性保護）
 process.on('unhandledRejection', (reason, promise) => {
   const msg = reason?.message || String(reason);
-  // Shoukaku 內部發送 API 請求時若剛好遇到 Lavalink 關閉，會產生無法捕獲的 fetch failed
-  // 由於這不影響我們的重連邏輯，將其過濾靜默以保持版面整潔
-  if (msg.includes('fetch failed') || msg.includes('ECONNREFUSED')) {
-    // 若需要除錯可改為 log.warn，一般情況下可直接忽略此噪音
-    return;
-  }
+  if (msg.includes('fetch failed') || msg.includes('ECONNREFUSED')) return;
   log.error('[unhandledRejection] 未預期的 Promise 異常（不中斷程式）：', msg);
 });
 
-// 捕獲所有未預期的同步例外（防禦性保護）
 process.on('uncaughtException', (err) => {
   log.error('[uncaughtException] 捕獲未預期例外（不中斷程式）：', err?.message || err);
 });
