@@ -11,7 +11,7 @@ services:
       - LAVALINK_PASSWORD=${LAVALINK_PASSWORD:-youshallnotpass}
       - LAVALINK_SECURE=false
     networks:
-      - lavalink
+      - musicbot
     depends_on:
       - lavalink
       
@@ -28,12 +28,12 @@ services:
       - ./application.yml:/opt/Lavalink/application.yml
       - ./plugins/:/opt/Lavalink/plugins/
     networks:
-      - lavalink
+      - musicbot
     expose:
       - 2333
     ports:
       - "2333:2333"
       
 networks:
-  lavalink:
-    name: lavalink
+  musicbot:
+    name: musicbot
