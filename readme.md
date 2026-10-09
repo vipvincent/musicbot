@@ -49,9 +49,11 @@
 
 2. 請複製專案根目錄下的`application.yml`到Lavalink目錄
    - Lavalink應該會自動下載以下插件，如果沒有請手動下載：
-      - [youtube_source](https://github.com/lavalink-devs/youtube-source)
+      - [youtube-source](https://github.com/lavalink-devs/youtube-source)
       - [LavaSrc](https://github.com/topi314/LavaSrc)
       - [Lavabili](https://github.com/ParrotXray/lavabili-plugin)
+
+> 當youtube-source無法使用時，可使用yt-dlp作為備用來源。
 
 ## 2. 取得 Bot Token 與邀請連結
 

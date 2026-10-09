@@ -13,3 +13,6 @@ Thumbs.db
 logs/
 plugins/
 *.jar
+
+# yt-dlp
+yt-dlp*

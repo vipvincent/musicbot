@@ -41,7 +41,7 @@ plugins:
       vkmusic: false # 啟用 Vk Music 來源
       tidal: false # 啟用 Tidal 來源
       qobuz : false # 啟用 Qobuz 來源
-      ytdlp: false # 啟用 yt-dlp 來源
+      ytdlp: false # 啟用 yt-dlp 來源，當youtube-source無法使用時可作為備用來源
       jiosaavn: false # 啟用 JioSaavn 來源
     lyrics-sources:
       spotify: false # 啟用 Spotify 歌詞來源
@@ -114,7 +114,7 @@ plugins:
       #      appId : optional (只有在使用舊版 userOauthToken 時才需要提供)
       #      appSecret : optional (只有在使用舊版 userOauthToken 時才需要提供)
     ytdlp:
-      path: "yt-dlp" # yt-dlp 可執行檔的路徑
+      path: "./yt-dlp" # yt-dlp 可執行檔的路徑
       searchLimit: 10 # 要返回多少個搜尋結果
       mixPlaylistLoadLimit: 25 # 混合播放清單每個載入的曲目數量。預設為 25
       playlistLoadLimit: 1000 # 一般播放清單每個載入的曲目數量。預設為 1000

@@ -10,6 +10,9 @@ services:
       - LAVALINK_PORT=2333
       - LAVALINK_PASSWORD=${LAVALINK_PASSWORD:-youshallnotpass}
       - LAVALINK_SECURE=false
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
     networks:
       - musicbot
     depends_on:
@@ -27,6 +30,8 @@ services:
       # 此處為Lavalink的配置文件和插件目錄，請修改到對應的路徑
       - ./application.yml:/opt/Lavalink/application.yml
       - ./plugins/:/opt/Lavalink/plugins/
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
     networks:
       - musicbot
     expose:
